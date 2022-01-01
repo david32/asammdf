@@ -333,6 +333,29 @@ class FileTreeWidget(QtWidgets.QTreeWidget):
         self.mode = "Natural sort"
 
 
+class SearchTreeWidget(QtWidgets.QTreeWidget):
+    def __init__(self, *args, **kwargs):
+
+        super().__init__(*args, **kwargs)
+
+        self.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        self.setDragDropMode(QtWidgets.QAbstractItemView.NoDragDrop)
+        self.setUniformRowHeights(True)
+
+        self.can_delete_items = False
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        modifiers = event.modifiers()
+
+        if key == QtCore.Qt.Key_Delete and self.can_delete_items:
+            selected_items = self.selectedItems()
+
+            root = self.invisibleRootItem()
+            for item in selected_items:
+                (item.parent() or root).removeChild(item)
+
+
 class ChannelsTreeWidget(QtWidgets.QTreeWidget):
     itemsDeleted = QtCore.pyqtSignal(list)
     set_time_offset = QtCore.pyqtSignal(list)
@@ -419,7 +442,7 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
         elif key == QtCore.Qt.Key_Insert and modifiers == QtCore.Qt.ControlModifier:
 
             dlg = AdvancedSearch(
-                {},
+                None,
                 show_add_window=False,
                 show_apply=True,
                 show_search=False,
@@ -1011,7 +1034,7 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
             pattern = dict(item.pattern)
             pattern["ranges"] = copy_ranges(widget.ranges)
             dlg = AdvancedSearch(
-                {},
+                None,
                 show_add_window=False,
                 show_apply=True,
                 show_search=False,

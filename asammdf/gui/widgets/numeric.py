@@ -229,7 +229,7 @@ class OnlineBackEnd:
             nones = []
 
             for signal in self.signals:
-                value = signal.item(sorted_column_index)
+                value = signal.get_value(sorted_column_index)
                 if value is None:
                     nones.append(signal)
                 elif isinstance(value, (np.flexible, bytes)):
@@ -240,12 +240,12 @@ class OnlineBackEnd:
             self.signals = [
                 *sorted(
                     numeric,
-                    key=lambda x: x.item(sorted_column_index),
+                    key=lambda x: x.get_value(sorted_column_index),
                     reverse=self.sort_reversed,
                 ),
                 *sorted(
                     string,
-                    key=lambda x: x.item(sorted_column_index),
+                    key=lambda x: x.get_value(sorted_column_index),
                     reverse=self.sort_reversed,
                 ),
                 *natsorted(nones, key=lambda x: x.name, reverse=self.sort_reversed),
@@ -1292,6 +1292,10 @@ class Numeric(QtWidgets.QWidget):
         self.channels.backend.does_not_exist(entry, exists)
 
     def set_format(self, fmt):
+        if fmt == "Phys":
+            fmt = "Physical"
+        elif fmt == "Binary":
+            fmt = "Bin"
         if fmt not in ("Physical", "Hex", "Bin"):
             fmt = "Physical"
 
@@ -1394,7 +1398,7 @@ class Numeric(QtWidgets.QWidget):
             signal_name = ""
             for sig in matches:
                 sig = sig.signal.cut(start=start)
-                if mode == "Raw" or sig.comversion is None:
+                if mode == "Raw" or sig.conversion is None:
                     samples = sig.raw_samples
                 else:
                     samples = sig.phys_samples
@@ -1461,7 +1465,7 @@ class Numeric(QtWidgets.QWidget):
             signal_name = ""
             for sig in matches:
                 sig = sig.signal.cut(stop=stop)
-                if mode == "raw values" or sig.comversion is None:
+                if mode == "raw values" or sig.conversion is None:
                     samples = sig.raw_samples[:-1]
                 else:
                     samples = sig.phys_samples[:-1]

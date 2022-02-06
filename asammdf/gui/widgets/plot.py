@@ -205,29 +205,6 @@ class PlotSignal(Signal):
 
         if len(self.phys_samples) and not fast:
 
-            if self.phys_samples.dtype.kind in "SUV":
-                self.is_string = True
-                self._min = ""
-                self._max = ""
-                self._avg = ""
-                self._rms = ""
-                self._std = ""
-            else:
-                self.is_string = False
-                samples = self.phys_samples[np.isfinite(self.phys_samples)]
-                if len(samples):
-                    self._min = np.nanmin(samples)
-                    self._max = np.nanmax(samples)
-                    self._avg = np.mean(samples)
-                    self._rms = np.sqrt(np.mean(np.square(samples)))
-                    self._std = np.std(samples)
-                else:
-                    self._min = "n.a."
-                    self._max = "n.a."
-                    self._avg = "n.a."
-                    self._rms = "n.a."
-                    self._std = "n.a."
-
             if self.raw_samples.dtype.kind in "SUV":
                 self._min_raw = ""
                 self._max_raw = ""
@@ -249,6 +226,42 @@ class PlotSignal(Signal):
                     self._avg_raw = "n.a."
                     self._rms_raw = "n.a."
                     self._std_raw = "n.a."
+
+            if self.phys_samples is self.raw_samples:
+                if self.phys_samples.dtype.kind in "SUV":
+                    self.is_string = True
+                else:
+                    self.is_string = False
+
+                self._min = self._min_raw
+                self._max = self._max_raw
+                self._avg = self._avg_raw
+                self._rms = self._rms_raw
+                self._std = self._std_raw
+
+            else:
+                if self.phys_samples.dtype.kind in "SUV":
+                    self.is_string = True
+                    self._min = ""
+                    self._max = ""
+                    self._avg = ""
+                    self._rms = ""
+                    self._std = ""
+                else:
+                    self.is_string = False
+                    samples = self.phys_samples[np.isfinite(self.phys_samples)]
+                    if len(samples):
+                        self._min = np.nanmin(samples)
+                        self._max = np.nanmax(samples)
+                        self._avg = np.mean(samples)
+                        self._rms = np.sqrt(np.mean(np.square(samples)))
+                        self._std = np.std(samples)
+                    else:
+                        self._min = "n.a."
+                        self._max = "n.a."
+                        self._avg = "n.a."
+                        self._rms = "n.a."
+                        self._std = "n.a."
 
             self.empty = False
 
@@ -1126,6 +1139,9 @@ class Plot(QtWidgets.QWidget):
 
         main_layout.addWidget(self.splitter)
 
+        self.show()
+        self.hide()
+
         if signals:
             self.add_new_channels(signals)
 
@@ -1166,6 +1182,8 @@ class Plot(QtWidgets.QWidget):
         )
 
         self.splitter.splitterMoved.connect(self.set_splitter)
+
+        self.show()
 
     def curve_clicked(self, uuid):
         iterator = QtWidgets.QTreeWidgetItemIterator(self.channel_selection)
@@ -1831,27 +1849,7 @@ class Plot(QtWidgets.QWidget):
 
         channels = valid
 
-        size = sum(self.splitter.sizes())
-
-        width = 0
-        for ch in channels:
-            width = max(
-                width,
-                self.channel_selection.fontMetrics()
-                .boundingRect(f"{ch.name} ({ch.unit})")
-                .width(),
-            )
-        width += 170
-
-        if width > self.splitter.sizes()[0]:
-
-            if size - width >= 300:
-                self.splitter.setSizes([width, size - width, 0])
-            else:
-                if size >= 350:
-                    self.splitter.setSizes([size - 300, 300, 0])
-                elif size >= 100:
-                    self.splitter.setSizes([50, size - 50, 0])
+        self.adjust_splitter(channels)
 
         channels = self.plot.add_new_channels(channels)
 
@@ -1884,10 +1882,7 @@ class Plot(QtWidgets.QWidget):
             # item.setData(QtCore.Qt.UserRole, sig.name)
             tooltip = getattr(sig, "tooltip", "") or f"{sig.name}\n{sig.comment}"
             if sig.source:
-                src = sig.source
-                source_type = v4c.SOURCE_TYPE_TO_STRING[src.source_type]
-                bus_type = v4c.BUS_TYPE_TO_STRING[src.bus_type]
-                details = f"     {source_type} source on bus {bus_type}: name=[{src.name}] path=[{src.path}]"
+                details = sig.source.get_details()
             else:
                 details = ""
 
@@ -2023,6 +2018,7 @@ class Plot(QtWidgets.QWidget):
                 elif isinstance(widget, ChannelGroupDisplay):
                     pattern = item.pattern
                     if pattern:
+                        pattern = dict(pattern)
                         ranges = copy_ranges(pattern["ranges"])
 
                         for range_info in ranges:
@@ -2168,6 +2164,31 @@ class Plot(QtWidgets.QWidget):
             self.range_modified()
         else:
             self.cursor_moved()
+
+    def adjust_splitter(self, channels=None):
+        channels = channels or self.plot.signals
+
+        size = sum(self.splitter.sizes())
+
+        width = 0
+        for ch in channels:
+            width = max(
+                width,
+                self.channel_selection.fontMetrics()
+                .boundingRect(f"{ch.name} ({ch.unit})")
+                .width(),
+            )
+        width += 170
+
+        if width > self.splitter.sizes()[0]:
+
+            if size - width >= 300:
+                self.splitter.setSizes([width, size - width, 0])
+            else:
+                if size >= 350:
+                    self.splitter.setSizes([size - 300, 300, 0])
+                elif size >= 100:
+                    self.splitter.setSizes([50, size - 50, 0])
 
 
 class _Plot(pg.PlotWidget):
@@ -2480,8 +2501,8 @@ class _Plot(pg.PlotWidget):
             curve.scatter.setBrush(color)
 
             if sig.individual_axis:
-                self.axes[index].set_pen(sig.pen)
-                self.axes[index].setTextPen(sig.pen)
+                self.get_axis(index).set_pen(sig.pen)
+                self.get_axis(index).setTextPen(sig.pen)
 
         if uuid == self.current_uuid:
             self.y_axis.set_pen(sig.pen)
@@ -2491,7 +2512,7 @@ class _Plot(pg.PlotWidget):
         sig, index = self.signal_by_uuid(uuid)
         sig.unit = unit
 
-        sig_axis = [self.axes[index]]
+        sig_axis = [self.get_axis(index)]
 
         if uuid == self.current_uuid:
             sig_axis.append(self.y_axis)
@@ -2513,7 +2534,7 @@ class _Plot(pg.PlotWidget):
         sig, index = self.signal_by_uuid(uuid)
         sig.name = name
 
-        sig_axis = [self.axes[index]]
+        sig_axis = [self.get_axis(index)]
 
         if uuid == self.current_uuid:
             sig_axis.append(self.y_axis)
@@ -2554,10 +2575,10 @@ class _Plot(pg.PlotWidget):
 
         if state in (QtCore.Qt.Checked, True, 1):
             if self.signals[index].enable:
-                self.axes[index].show()
+                self.get_axis(index).show()
             self.signals[index].individual_axis = True
         else:
-            self.axes[index].hide()
+            self.get_axis(index).hide()
             self.signals[index].individual_axis = False
 
     def set_signal_enable(self, uuid, state):
@@ -2573,7 +2594,7 @@ class _Plot(pg.PlotWidget):
             signal.trim(start, stop, width)
             self.view_boxes[index].setXLink(self.viewbox)
             if signal.individual_axis:
-                self.axes[index].show()
+                self.get_axis(index).show()
 
             uuids = self._timebase_db.setdefault(id(sig.timestamps), set())
             uuids.add(sig.uuid)
@@ -2581,7 +2602,7 @@ class _Plot(pg.PlotWidget):
         else:
             self.signals[index].enable = False
             self.view_boxes[index].setXLink(None)
-            self.axes[index].hide()
+            self.get_axis(index).hide()
 
             try:
                 self._timebase_db[id(sig.timestamps)].remove(uuid)
@@ -3326,24 +3347,9 @@ class _Plot(pg.PlotWidget):
 
         for index, sig in enumerate(channels, initial_index):
 
-            axis = FormatedAxis(
-                "left",  # "right",
-                pen=sig.pen,
-                textPen=sig.pen,
-                text=sig.name if len(sig.name) <= 32 else "{sig.name[:29]}...",
-                units=sig.unit,
-            )
-            if sig.conversion and hasattr(sig.conversion, "text_0"):
-                axis.text_conversion = sig.conversion
-
             view_box = pg.ViewBox(enableMenu=False)
             view_box.setGeometry(geometry)
             view_box.disableAutoRange()
-
-            axis.linkToView(view_box)
-
-            self.layout.addItem(axis, 2, self._axes_layout_pos)
-            self._axes_layout_pos += 1
 
             self.scene_.addItem(view_box)
 
@@ -3374,8 +3380,9 @@ class _Plot(pg.PlotWidget):
             if not sig.empty:
                 view_box.setYRange(sig.min, sig.max, padding=0, update=True)
 
-            self.axes.append(axis)
-            axis.hide()
+            self.axes.append(self._axes_layout_pos)
+            self._axes_layout_pos += 1
+
             view_box.addItem(curve)
 
             if initial_index == 0 and index == 0:
@@ -3394,18 +3401,26 @@ class _Plot(pg.PlotWidget):
 
     def _compute_all_timebase(self):
         if self._timebase_db:
+            stamps = {id(sig.timestamps): sig.timestamps for sig in self.signals}
+
             timebases = [
-                sig.timestamps
-                for sig in self.signals
-                if id(sig.timestamps) in self._timebase_db
+                timestamps
+                for id_, timestamps in stamps.items()
+                if id_ in self._timebase_db
             ]
-            if timebases:
+
+            count = len(timebases)
+
+            if count == 0:
+                new_timebase = np.array([])
+            elif count == 1:
+                new_timebase = timebases[0]
+            else:
                 try:
                     new_timebase = np.unique(np.concatenate(timebases))
                 except MemoryError:
                     new_timebase = reduce(np.union1d, timebases)
-            else:
-                new_timebase = np.array([])
+
             self.all_timebase = self.timebase = new_timebase
         else:
             self.all_timebase = self.timebase = np.array([])
@@ -3465,9 +3480,10 @@ class _Plot(pg.PlotWidget):
             self.view_boxes[i].removeItem(item)
 
             item = self.axes.pop(i)
-            self.layout.removeItem(item)
-            item.scene().removeItem(item)
-            item.unlinkFromView()
+            if isinstance(item, FormatedAxis):
+                self.layout.removeItem(item)
+                item.scene().removeItem(item)
+                item.unlinkFromView()
 
             item = self.view_boxes.pop(i)
             item.setXLink(None)
@@ -3556,6 +3572,33 @@ class _Plot(pg.PlotWidget):
             sig.mdf_uuid = os.urandom(6).hex()
             self.add_new_channels([sig], computed=True)
             self.computation_channel_inserted.emit()
+
+    def get_axis(self, index):
+        axis = self.axes[index]
+        if isinstance(axis, int):
+            sig = self.signals[index]
+            view_box = self.view_boxes[index]
+            position = axis
+
+            axis = FormatedAxis(
+                "left",
+                pen=sig.pen,
+                textPen=sig.pen,
+                text=sig.name if len(sig.name) <= 32 else "{sig.name[:29]}...",
+                units=sig.unit,
+            )
+            if sig.conversion and hasattr(sig.conversion, "text_0"):
+                axis.text_conversion = sig.conversion
+
+            axis.linkToView(view_box)
+            self.layout.addItem(axis, 2, position)
+
+            self.axes[index] = axis
+            axis.hide()
+
+            self.update()
+
+        return axis
 
 
 class CursorInfo(QtWidgets.QLabel):

@@ -67,7 +67,7 @@ class Source:
     def from_source(cls, source: SourceType) -> Source:
         if isinstance(source, v3b.ChannelExtension):
             if source.type == v3c.SOURCE_ECU:
-                source = cls(
+                return cls(
                     source.name,
                     source.path,
                     source.comment,
@@ -75,7 +75,7 @@ class Source:
                     cls.BUS_TYPE_NONE,  # bus type none
                 )
             else:
-                source = cls(
+                return cls(
                     source.name,
                     source.path,
                     source.comment,
@@ -99,3 +99,8 @@ class Source:
                 source.source_type,
                 source.bus_type,
             )
+
+    def get_details(self) -> str:
+        source_type = v4c.SOURCE_TYPE_TO_STRING[self.source_type]
+        bus_type = v4c.BUS_TYPE_TO_STRING[self.bus_type]
+        return f"     {source_type} source on bus {bus_type}: name=[{self.name}] path=[{self.path}]"

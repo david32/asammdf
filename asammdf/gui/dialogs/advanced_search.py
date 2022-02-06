@@ -4,6 +4,7 @@ import re
 from natsort import natsorted
 from PyQt5 import QtCore, QtWidgets
 
+from ...blocks.utils import extract_cncomment_xml
 from ..ui import resource_rc as resource_rc
 from ..ui.search_dialog import Ui_SearchDialog
 from .range_editor import RangeEditor
@@ -45,6 +46,9 @@ class AdvancedSearch(Ui_SearchDialog, QtWidgets.QDialog):
         self.match_kind.currentTextChanged.connect(self.search_box.textChanged.emit)
         self.matches.itemDoubleClicked.connect(self._match_double_clicked)
         self.selection.itemDoubleClicked.connect(self._selection_double_clicked)
+
+        self.matches.header().sectionResized.connect(self.section_resized)
+        self.selection.header().sectionResized.connect(self.section_resized)
 
         self.apply_pattern_btn.clicked.connect(self._apply_pattern)
         self.cancel_pattern_btn.clicked.connect(self._cancel_pattern)
@@ -88,6 +92,12 @@ class AdvancedSearch(Ui_SearchDialog, QtWidgets.QDialog):
 
         self.setWindowTitle(window_title)
 
+        self.matches.setColumnWidth(0, 450)
+        self.matches.setColumnWidth(1, 40)
+        self.matches.setColumnWidth(2, 40)
+        self.matches.setColumnWidth(3, 170)
+        self.matches.setColumnWidth(4, 170)
+
     def search_text_changed(self):
         text = self.search_box.text().strip()
         if len(text) >= 2:
@@ -106,30 +116,62 @@ class AdvancedSearch(Ui_SearchDialog, QtWidgets.QDialog):
 
                 matches = {}
                 for name in found_names:
-                    for group_index, channel_index in self.channels_db[name]:
-                        name_list = matches.setdefault((group_index, channel_index), [])
-                        ch = self.mdf.groups[group_index].channels[channel_index]
+                    for entry in self.channels_db[name]:
+
+                        if entry not in matches:
+                            (group_index, channel_index) = entry
+                            ch = self.mdf.groups[group_index].channels[channel_index]
+                            cg = self.mdf.groups[group_index].channel_group
+
+                            source = ch.source or cg.acq_source
+
+                            matches[entry] = {
+                                "names": [],
+                                "comment": extract_cncomment_xml(ch.comment).strip(),
+                                "source_name": source.name if source else "",
+                                "source_path": source.path if source else "",
+                            }
+
+                        info = matches[entry]
+
                         if name == ch.name:
-                            name_list.insert(0, name)
+                            info["names"].insert(0, name)
                         else:
-                            name_list.append(name)
+                            info["names"].append(name)
 
                 matches = [
-                    (group_index, channel_index, names)
-                    for (group_index, channel_index), names in matches.items()
+                    (group_index, channel_index, info)
+                    for (group_index, channel_index), info in matches.items()
                 ]
-                matches.sort(key=lambda x: x[2][0])
+                matches.sort(key=lambda x: info["names"][0])
 
                 self.matches.clear()
-                for group_index, channel_index, names in matches:
+                for group_index, channel_index, info in matches:
+                    names = info["names"]
                     group_index, channel_index = str(group_index), str(channel_index)
                     item = QtWidgets.QTreeWidgetItem(
-                        [names[0], group_index, channel_index]
+                        [
+                            names[0],
+                            group_index,
+                            channel_index,
+                            info["source_name"],
+                            info["source_path"],
+                            info["comment"],
+                        ]
                     )
                     self.matches.addTopLevelItem(item)
 
                     children = [
-                        QtWidgets.QTreeWidgetItem([name, group_index, channel_index])
+                        QtWidgets.QTreeWidgetItem(
+                            [
+                                name,
+                                group_index,
+                                channel_index,
+                                info["source_name"],
+                                info["source_path"],
+                                info["comment"],
+                            ]
+                        )
                         for name in names[1:]
                     ]
 
@@ -137,14 +179,11 @@ class AdvancedSearch(Ui_SearchDialog, QtWidgets.QDialog):
                         item.addChildren(children)
 
                 if matches:
-                    self.status.setText("")
+                    self.status.setText(f"{len(found_names)} results")
                 else:
-                    self.status.setText("No match found")
+                    self.status.setText("No results")
 
                 self.matches.expandAll()
-                self.matches.header().resizeSections(
-                    QtWidgets.QHeaderView.ResizeMode.ResizeToContents
-                )
 
             except Exception as err:
                 self.status.setText(str(err))
@@ -156,13 +195,27 @@ class AdvancedSearch(Ui_SearchDialog, QtWidgets.QDialog):
         iterator = QtWidgets.QTreeWidgetItemIterator(self.selection)
         while iterator.value():
             item = iterator.value()
-            data = (item.text(0), item.text(1), item.text(2))
+            data = (
+                item.text(0),
+                item.text(1),
+                item.text(2),
+                item.text(3),
+                item.text(4),
+                item.text(5),
+            )
             selection.add(data)
 
             iterator += 1
 
         for item in self.matches.selectedItems():
-            data = (item.text(0), item.text(1), item.text(2))
+            data = (
+                item.text(0),
+                item.text(1),
+                item.text(2),
+                item.text(3),
+                item.text(4),
+                item.text(5),
+            )
             selection.add(data)
 
         selection = natsorted(selection)
@@ -171,9 +224,6 @@ class AdvancedSearch(Ui_SearchDialog, QtWidgets.QDialog):
 
         self.selection.clear()
         self.selection.addTopLevelItems(items)
-        self.selection.header().resizeSections(
-            QtWidgets.QHeaderView.ResizeMode.ResizeToContents
-        )
 
     def _apply(self, event=None):
         if self._return_names:
@@ -250,12 +300,26 @@ class AdvancedSearch(Ui_SearchDialog, QtWidgets.QDialog):
         iterator = QtWidgets.QTreeWidgetItemIterator(self.selection)
         while iterator.value():
             item = iterator.value()
-            data = (item.text(0), item.text(1), item.text(2))
+            data = (
+                item.text(0),
+                item.text(1),
+                item.text(2),
+                item.text(3),
+                item.text(4),
+                item.text(5),
+            )
             selection.add(data)
 
             iterator += 1
 
-        new_data = new_item.text(0), new_item.text(1), new_item.text(2)
+        new_data = (
+            new_item.text(0),
+            new_item.text(1),
+            new_item.text(2),
+            new_item.text(3),
+            new_item.text(4),
+            new_item.text(5),
+        )
 
         if new_data not in selection:
             selection.add(new_data)
@@ -266,10 +330,11 @@ class AdvancedSearch(Ui_SearchDialog, QtWidgets.QDialog):
 
             self.selection.clear()
             self.selection.addTopLevelItems(items)
-            self.selection.header().resizeSections(
-                QtWidgets.QHeaderView.ResizeMode.ResizeToContents
-            )
 
     def _selection_double_clicked(self, item):
         root = self.selection.invisibleRootItem()
         (item.parent() or root).removeChild(item)
+
+    def section_resized(self, index, old_size, new_size):
+        self.selection.setColumnWidth(index, new_size)
+        self.matches.setColumnWidth(index, new_size)

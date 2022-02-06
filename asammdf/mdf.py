@@ -43,6 +43,7 @@ from .blocks.mdf_v2 import MDF2
 from .blocks.mdf_v3 import MDF3
 from .blocks.mdf_v4 import MDF4
 from .blocks.options import FloatInterpolation, IntegerInterpolation
+from .blocks.source_utils import Source
 from .blocks.utils import (
     components,
     csv_bytearray2hex,
@@ -544,8 +545,8 @@ class MDF:
                         ev_type = v4c.EVENT_TYPE_START_RECORDING_TRIGGER
                     event = EventBlock(
                         event_type=ev_type,
-                        sync_base=int(timestamp * 10 ** 9),
-                        sync_factor=10 ** -9,
+                        sync_base=int(timestamp * 10**9),
+                        sync_factor=10**-9,
                         scope_0_addr=0,
                     )
                     event.comment = comment
@@ -703,7 +704,7 @@ class MDF:
             self._read_fragment_size = int(read_fragment_size)
 
         if write_fragment_size is not None:
-            self._write_fragment_size = min(int(write_fragment_size), 4 * 2 ** 20)
+            self._write_fragment_size = min(int(write_fragment_size), 4 * 2**20)
 
         if use_display_names is not None:
             self._use_display_names = bool(use_display_names)
@@ -1557,7 +1558,7 @@ class MDF:
                         comment = ""
 
                     if comment:
-                        for char in r' \/:"':
+                        for char in f'\n\t\r\b <>\/:"?*|':
                             comment = comment.replace(char, "_")
                         group_csv_name = (
                             filename.parent
@@ -3045,7 +3046,7 @@ class MDF:
                         )
 
         if validate:
-            signals = [sig.validate() for sig in signals]
+            signals = [sig.validate(copy=False) for sig in signals]
 
         for signal, channel in zip(signals, channels):
             if isinstance(channel, str):
@@ -4614,21 +4615,21 @@ class MDF:
                                             if prefix:
                                                 acq_name = (
                                                     comment
-                                                ) = f'{prefix}: CAN{bus} consolidated PGN=0x{msg_id:X} "{message}"'
+                                                ) = f"{prefix}: CAN{bus} consolidated PGN=0x{msg_id:X} {message}"
                                             else:
                                                 acq_name = (
                                                     comment
-                                                ) = f'CAN{bus} consolidated PGN=0x{msg_id:X} "{message}"'
+                                                ) = f"CAN{bus} consolidated PGN=0x{msg_id:X} {message}"
 
                                         else:
+                                            source_adddress = original_msg_id & 0xFF
                                             if prefix:
-                                                acq_name = (
-                                                    comment
-                                                ) = f'{prefix}: CAN{bus} PGN=0x{msg_id:X} "{message}" from ID=0x{original_msg_id:X}'
+                                                comment = f"{prefix}: CAN{bus} PGN=0x{msg_id:X} {message} from ID=0x{original_msg_id:X} SA=0x{source_adddress:X}"
                                             else:
-                                                acq_name = (
-                                                    comment
-                                                ) = f'CAN{bus} PGN=0x{msg_id:X} "{message}" from ID=0x{original_msg_id:X}'
+                                                comment = f"CAN{bus} PGN=0x{msg_id:X} {message} from ID=0x{original_msg_id:X} SA=0x{source_adddress:X}"
+                                            acq_name = (
+                                                f"SourceAddress = 0x{source_adddress}"
+                                            )
                                     else:
 
                                         if prefix:
@@ -4638,14 +4639,37 @@ class MDF:
                                             acq_name = (
                                                 f"CAN{bus} message ID=0x{msg_id:X}"
                                             )
-                                            comment = f'CAN{bus} - message "{message}" 0x{msg_id:X}'
+                                            comment = f"CAN{bus} - message {message} 0x{msg_id:X}"
+
+                                    acq_source = Source(
+                                        name=acq_name,
+                                        path=f"CAN{int(bus)}.CAN_DataFrame.ID=0x{message.arbitration_id.id:X}",
+                                        comment=f"""\
+<SIcomment>
+    <TX>CAN{bus} data frame 0x{message.arbitration_id.id:X} - {message.name}</TX>
+    <bus name="CAN{int(bus)}"/>
+    <common_properties>
+        <e name="ChannelNo" type="integer">{int(bus)}</e>
+    </common_properties>
+</SIcomment>""",
+                                        source_type=v4c.SOURCE_BUS,
+                                        bus_type=v4c.BUS_TYPE_CAN,
+                                    )
+
+                                    for sig in sigs:
+                                        sig.source = acq_source
 
                                     cg_nr = out.append(
                                         sigs,
                                         acq_name=acq_name,
+                                        acq_source=acq_source,
                                         comment=comment,
                                         common_timebase=True,
                                     )
+
+                                    out.groups[
+                                        cg_nr
+                                    ].channel_group.flags = v4c.FLAG_CG_BUS_EVENT
 
                                     if is_j1939:
                                         max_flags.append([False])
@@ -4895,12 +4919,35 @@ class MDF:
                                             f"from LIN{bus} message ID=0x{msg_id:X}"
                                         )
 
+                                    acq_source = Source(
+                                        name=acq_name,
+                                        path=f"LIN{int(bus)}.LIN_Frame.ID=0x{message.arbitration_id.id:X}",
+                                        comment=f"""\
+<SIcomment>
+    <TX>LIN{bus} data frame 0x{message.arbitration_id.id:X} - {message.name}</TX>
+    <bus name="LIN{int(bus)}"/>
+    <common_properties>
+        <e name="ChannelNo" type="integer">{int(bus)}</e>
+    </common_properties>
+</SIcomment>""",
+                                        source_type=v4c.SOURCE_BUS,
+                                        bus_type=v4c.BUS_TYPE_LIN,
+                                    )
+
+                                    for sig in sigs:
+                                        sig.source = acq_source
+
                                     cg_nr = out.append(
                                         sigs,
                                         acq_name=acq_name,
-                                        comment=f'from LIN{bus} - message "{message}" 0x{msg_id:X}',
+                                        acq_source=acq_source,
+                                        comment=f"from LIN{bus} - message {message} 0x{msg_id:X}",
                                         common_timebase=True,
                                     )
+
+                                    out.groups[
+                                        cg_nr
+                                    ].channel_group.flags = v4c.FLAG_CG_BUS_EVENT
 
                                 else:
 

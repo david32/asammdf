@@ -35,20 +35,21 @@ from traceback import format_exc
 import numpy as np
 import numpy.core.defchararray as npchar
 import pandas as pd
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 Qt = QtCore.Qt
 
 from ...blocks.utils import csv_bytearray2hex, pandas_query_compatible
 from ...mdf import MDF
 from ..dialogs.range_editor import RangeEditor
-from ..ui import resource_rc as resource_rc
+from ..ui import resource_rc
 from ..ui.tabular import Ui_TabularDisplay
 from ..utils import (
     copy_ranges,
     extract_mime_names,
     get_colors_using_ranges,
     run_thread_with_progress,
+    value_as_str,
 )
 from .tabular_filter import TabularFilter
 
@@ -313,32 +314,11 @@ class DataTableModel(QtCore.QAbstractTableModel):
             cell_is_na = pd.isna(cell)
 
             if type(cell_is_na) == bool and cell_is_na:
-                if role == QtCore.Qt.DisplayRole:
-                    return "●"
-                elif role == QtCore.Qt.EditRole:
-                    return ""
-                elif role == QtCore.Qt.ToolTipRole:
-                    return "NaN"
-
-            # Float formatting
-            if isinstance(cell, (float, np.floating)):
-                if role == QtCore.Qt.DisplayRole:
-                    if self.float_precision != -1:
-                        template = f"{{:.{self.float_precision}f}}"
-                        return template.format(cell)
-                    else:
-                        return str(cell)
-
-            if isinstance(cell, (int, np.integer)):
-                if role == QtCore.Qt.DisplayRole:
-                    if self.format == "hex":
-                        return f"{cell:X}"
-                    elif self.format == "bin":
-                        return f"{cell:b}"
-                    else:
-                        return str(cell)
-
-            return str(cell)
+                return "●"
+            elif isinstance(cell, (bytes, np.bytes_)):
+                return cell.decode("utf-8", "replace")
+            else:
+                return value_as_str(cell, self.format, None, self.float_precision)
 
         elif role == QtCore.Qt.BackgroundRole:
 
@@ -381,16 +361,16 @@ class DataTableModel(QtCore.QAbstractTableModel):
 
         elif role == QtCore.Qt.TextAlignmentRole:
             if isinstance(cell, str):
-                return QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
+                return int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
             elif isinstance(cell, pd.Timestamp):
-                return QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
+                return int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
             else:
                 if self.float_precision == -1 and isinstance(
                     cell, (float, np.floating)
                 ):
-                    return QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
+                    return int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
                 else:
-                    return QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
+                    return int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
 
     def flags(self, index):
         return QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable
@@ -400,14 +380,14 @@ class DataTableModel(QtCore.QAbstractTableModel):
 
 
 class DataTableView(QtWidgets.QTableView):
-    add_channels_request = QtCore.pyqtSignal(list)
+    add_channels_request = QtCore.Signal(list)
 
     def __init__(self, parent):
         super().__init__(parent)
         self.dataframe_viewer = parent
         self.pgdf = parent.pgdf
 
-        self._backgrund_color = self.palette().color(QtGui.QPalette.Background)
+        self._backgrund_color = self.palette().color(QtGui.QPalette.Window)
         self._font_color = self.palette().color(QtGui.QPalette.WindowText)
 
         # Create and set model
@@ -494,6 +474,30 @@ class DataTableView(QtWidgets.QTableView):
             else:
                 return
 
+    def keyPressEvent(self, event):
+
+        key = event.key()
+        modifiers = event.modifiers()
+
+        if key == QtCore.Qt.Key_R and modifiers == QtCore.Qt.ControlModifier:
+            selected_items = set(
+                index.column() for index in self.selectedIndexes() if index.isValid()
+            )
+
+            if selected_items:
+
+                dlg = RangeEditor("<selected signals>", "", [], parent=self, brush=True)
+                dlg.exec_()
+                if dlg.pressed_button == "apply":
+                    ranges = dlg.result
+
+                    for index in selected_items:
+                        original_name = self.pgdf.df_unfiltered.columns[index]
+                        self.pgdf.tabular.ranges[original_name] = copy_ranges(ranges)
+
+        else:
+            super().keyPressEvent(event)
+
 
 class HeaderModel(QtCore.QAbstractTableModel):
     def __init__(self, parent, orientation):
@@ -562,11 +566,11 @@ class HeaderModel(QtCore.QAbstractTableModel):
                 )
 
                 if np.issubdtype(dtype, np.integer):
-                    return QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
+                    return int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 elif float_precision != -1 and np.issubdtype(dtype, np.floating):
-                    return QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
+                    return int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 else:
-                    return QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
+                    return int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
             else:
                 return QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
 
@@ -1062,7 +1066,7 @@ class HeaderNamesModel(QtCore.QAbstractTableModel):
                 return icon
 
         elif role == QtCore.Qt.TextAlignmentRole:
-            return QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
+            return int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
 
 
 class HeaderNamesView(QtWidgets.QTableView):
@@ -1305,7 +1309,7 @@ class ColumnMenu(QtWidgets.QMenu):
         self.close()
 
     def add_action(self, text, function):
-        action = QtWidgets.QAction(text, self)
+        action = QtGui.QAction(text, self)
         action.triggered.connect(function)
         self.addAction(action)
 
@@ -1327,8 +1331,8 @@ class ColumnMenu(QtWidgets.QMenu):
 
 
 class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
-    add_channels_request = QtCore.pyqtSignal(list)
-    timestamp_changed_signal = QtCore.pyqtSignal(object, float)
+    add_channels_request = QtCore.Signal(list)
+    timestamp_changed_signal = QtCore.Signal(object, float)
 
     def __init__(self, df, ranges=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1681,6 +1685,7 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
         return config
 
     def time_as_date_changed(self, state):
+        s = self.start
         count = self.filters.count()
 
         if state == QtCore.Qt.Checked:
@@ -1693,11 +1698,11 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
                 else:
                     filter.validate_target()
 
-            timestamps = pd.to_datetime(
-                self.tree.pgdf.df_unfiltered["timestamps"] + self.start,
-                unit="s",
+            delta = pd.to_timedelta(
+                self.tree.pgdf.df_unfiltered["timestamps"], unit="s"
             )
 
+            timestamps = self.start + delta
             self.tree.pgdf.df_unfiltered["timestamps"] = timestamps
         else:
             for i in range(count):
@@ -2139,12 +2144,14 @@ class DataFrameViewer(QtWidgets.QWidget):
         if event.key() == Qt.Key_C and (mods & Qt.ControlModifier):
             self.copy()
         # Ctrl+Shift+C
-        if (
+        elif (
             event.key() == Qt.Key_C
             and (mods & Qt.ShiftModifier)
             and (mods & Qt.ControlModifier)
         ):
             self.copy(header=True)
+        else:
+            self.dataView.keyPressEvent(event)
 
     def copy(self, header=False):
         """
@@ -2198,19 +2205,29 @@ class DataFrameViewer(QtWidgets.QWidget):
                 if isinstance(col.values[0], np.floating):
                     col = col.round(decimals)
                     df[name] = col
+            float_format = f"%.{decimals}f"
+        else:
+            float_format = "%.16f"
 
         # If I try to use df.to_clipboard without starting new thread, large selections give access denied error
         if df.shape == (1, 1):
             # Special case for single-cell copy, excel=False removes the trailing \n character.
             threading.Thread(
                 target=lambda df: df.to_clipboard(
-                    index=header, header=header, excel=False
+                    index=header,
+                    header=header,
+                    excel=False,
+                    float_format=float_format,
                 ),
                 args=(df,),
             ).start()
         else:
             threading.Thread(
-                target=lambda df: df.to_clipboard(index=header, header=header),
+                target=lambda df: df.to_clipboard(
+                    index=header,
+                    header=header,
+                    float_format=float_format,
+                ),
                 args=(df,),
             ).start()
 

@@ -5,9 +5,9 @@ import re
 from natsort import natsorted
 import numpy as np
 from numpy import searchsorted
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
-from ..ui import resource_rc as resource_rc
+from ..ui import resource_rc
 from ..ui.bar import Ui_BarDisplay
 from ..utils import COLORS
 from .channel_bar_display import ChannelBarDisplay
@@ -25,8 +25,8 @@ OPS = {
 
 
 class Bar(Ui_BarDisplay, QtWidgets.QWidget):
-    add_channels_request = QtCore.pyqtSignal(list)
-    timestamp_changed_signal = QtCore.pyqtSignal(object, float)
+    add_channels_request = QtCore.Signal(list)
+    timestamp_changed_signal = QtCore.Signal(object, float)
 
     def __init__(self, signals, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -77,11 +77,11 @@ class Bar(Ui_BarDisplay, QtWidgets.QWidget):
             sig = self.signals[uuid]
 
             if len(sig):
-                if (sig.group_index, sig.mdf_uuid) in idx_cache:
-                    idx = idx_cache[(sig.group_index, sig.mdf_uuid)]
+                if (sig.group_index, sig.origin_uuid) in idx_cache:
+                    idx = idx_cache[(sig.group_index, sig.origin_uuid)]
                 else:
                     idx = min(sig.size - 1, searchsorted(sig.timestamps, stamp))
-                    idx_cache[(sig.group_index, sig.mdf_uuid)] = idx
+                    idx_cache[(sig.group_index, sig.origin_uuid)] = idx
                 value = sig.samples[idx]
 
                 widget.set_value(value)
@@ -164,7 +164,7 @@ class Bar(Ui_BarDisplay, QtWidgets.QWidget):
                 sig.name,
                 sig.computation,
                 self.channels,
-                sig.mdf_uuid,
+                sig.origin_uuid,
             )
             item.setData(QtCore.Qt.UserRole, sig.name)
             tooltip = getattr(sig, "tooltip", "") or sig.comment

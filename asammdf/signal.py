@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 import logging
 from textwrap import fill
+from traceback import format_exc
 from typing import Any
 
 import numpy as np
@@ -17,7 +18,7 @@ from .blocks import v4_blocks as v4b
 from .blocks.conversion_utils import from_dict
 from .blocks.options import FloatInterpolation, IntegerInterpolation
 from .blocks.source_utils import Source
-from .blocks.utils import extract_cncomment_xml, MdfException
+from .blocks.utils import extract_xml_comment, MdfException
 from .types import (
     ChannelConversionType,
     FloatInterpolationModeType,
@@ -214,6 +215,7 @@ class Signal(object):
             return
 
         except:
+            print(format_exc())
             try:
                 import matplotlib.pyplot as plt
                 from matplotlib.widgets import Slider
@@ -239,7 +241,7 @@ class Signal(object):
 
             if self.comment:
                 comment = self.comment.replace("$", "")
-                comment = extract_cncomment_xml(comment)
+                comment = extract_xml_comment(comment)
                 comment = fill(comment, 120).replace("\\n", " ")
 
                 title = f"{name}\n({comment})"
@@ -464,7 +466,7 @@ class Signal(object):
 
         original_start, original_stop = (start, stop)
 
-        if len(self) == 0:
+        if self.samples.size == 0:
             result = Signal(
                 np.array([], dtype=self.samples.dtype),
                 np.array([], dtype=self.timestamps.dtype),
@@ -565,6 +567,10 @@ class Signal(object):
                             invalidation_bits = self.invalidation_bits[:stop].copy()
                         else:
                             invalidation_bits = None
+
+                    if samples.dtype != self.samples.dtype:
+                        samples = samples.astype(self.samples.dtype)
+
                     result = Signal(
                         samples,
                         timestamps,
@@ -640,6 +646,10 @@ class Signal(object):
                             invalidation_bits = self.invalidation_bits[start:].copy()
                         else:
                             invalidation_bits = None
+
+                    if samples.dtype != self.samples.dtype:
+                        samples = samples.astype(self.samples.dtype)
+
                     result = Signal(
                         samples,
                         timestamps,
@@ -770,6 +780,9 @@ class Signal(object):
                                         interpolated.invalidation_bits,
                                         invalidation_bits,
                                     )
+
+                    if samples.dtype != self.samples.dtype:
+                        samples = samples.astype(self.samples.dtype)
 
                     result = Signal(
                         samples,
@@ -1057,6 +1070,9 @@ class Signal(object):
 
                     if invalidation_bits is not None:
                         invalidation_bits = invalidation_bits[idx]
+
+            if s.dtype != self.samples.dtype:
+                s = s.astype(self.samples.dtype)
 
             return Signal(
                 s,

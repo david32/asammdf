@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import bz2
-from collections import defaultdict, OrderedDict
+from collections import defaultdict
 from collections.abc import Iterable, Iterator, Sequence
 from copy import deepcopy
 import csv
@@ -240,17 +240,48 @@ class MDF:
 
                 elif isinstance(name, bz2.BZ2File):
                     original_name = Path(name._fp.name)
-                    name = get_temporary_filename(original_name, dir=temporary_folder)
-                    name.write_bytes(name.read())
-                    file_stream = open(name, "rb")
+                    tmp_name = get_temporary_filename(
+                        original_name, dir=temporary_folder
+                    )
+                    tmp_name.write_bytes(name.read())
+                    file_stream = open(tmp_name, "rb")
+                    name = tmp_name
+
                     do_close = True
+
                 elif isinstance(name, gzip.GzipFile):
 
                     original_name = Path(name.name)
-                    name = get_temporary_filename(original_name, dir=temporary_folder)
-                    name.write_bytes(name.read())
-                    file_stream = open(name, "rb")
+                    tmp_name = get_temporary_filename(
+                        original_name, dir=temporary_folder
+                    )
+                    tmp_name.write_bytes(name.read())
+                    file_stream = open(tmp_name, "rb")
+                    name = tmp_name
+
                     do_close = True
+
+            elif isinstance(name, zipfile.ZipFile):
+
+                archive = name
+                files = archive.namelist()
+                if len(files) != 1:
+                    raise Exception("invalid zipped MF4: must contain a single file")
+                fname = original_name = files[0]
+
+                name = get_temporary_filename(Path(original_name), dir=temporary_folder)
+
+                if Path(fname).suffix.lower() not in (".mdf", ".dat", ".mf4"):
+                    raise Exception(
+                        "invalid zipped MF4: must contain a single MDF file"
+                    )
+
+                tmpdir = mkdtemp()
+                output = archive.extract(fname, tmpdir)
+                move(output, name)
+
+                file_stream = open(name, "rb")
+                do_close = True
 
             else:
                 name = original_name = Path(name)
@@ -618,6 +649,7 @@ class MDF:
         | None = None,
         raise_on_multiple_occurrences: bool | None = None,
         temporary_folder: str | None = None,
+        fill_0_for_missing_computation_channels: bool | None = None,
     ) -> None:
         """configure MDF parameters
 
@@ -631,6 +663,7 @@ class MDF:
         * copy_on_get = False
         * raise_on_multiple_occurrences = True
         * temporary_folder = ""
+        * fill_0_for_missing_computation_channels = False
 
         Parameters
         ----------
@@ -686,6 +719,11 @@ class MDF:
 
             .. versionadded:: 7.0.0
 
+        fill_0_for_missing_computation_channels : bool
+            when a channel required by a computed channel is missing, then fill with 0 values.
+            If false then the computation will fail and the computed channel will be marked as not existing.
+
+            .. versionadded:: 7.1.0
         """
 
         if from_other is not None:
@@ -698,6 +736,9 @@ class MDF:
             self._float_interpolation = from_other._float_interpolation
             self._raise_on_multiple_occurrences = (
                 from_other._raise_on_multiple_occurrences
+            )
+            self._fill_0_for_missing_computation_channels = (
+                from_other._fill_0_for_missing_computation_channels
             )
 
         if read_fragment_size is not None:
@@ -730,6 +771,11 @@ class MDF:
 
         if raise_on_multiple_occurrences is not None:
             self._raise_on_multiple_occurrences = bool(raise_on_multiple_occurrences)
+
+        if fill_0_for_missing_computation_channels is not None:
+            self._fill_0_for_missing_computation_channels = bool(
+                fill_0_for_missing_computation_channels
+            )
 
     def convert(self, version: str) -> MDF:
         """convert *MDF* to other version
@@ -964,7 +1010,7 @@ class MDF:
                         if start_index == 0 and stop_index == len(master):
                             needs_cutting = False
 
-                # update the signal is this is not the first yield
+                # update the signal if this is not the first yield
                 if j:
                     for signal, (samples, invalidation) in zip(signals, sigs[1:]):
                         signal.samples = samples
@@ -1186,6 +1232,11 @@ class MDF:
 
               .. versionadded:: 6.2.0
 
+            * add_units (False) : bool
+              only valid for CSV: add the channel units on the second row of the CSV file
+
+              .. versionadded:: 7.1.0
+
 
         """
 
@@ -1283,11 +1334,9 @@ class MDF:
                 raw=raw,
                 numeric_1D_only=fmt == "parquet",
             )
-            units = OrderedDict()
-            comments = OrderedDict()
+            units = {}
+            comments = {}
             used_names = UniqueDB()
-
-            dropped = {}
 
             groups_nr = len(self.groups)
             for i, grp in enumerate(self.groups):
@@ -1411,6 +1460,27 @@ class MDF:
                             group.attrs["master"] = (
                                 self.groups[group_index].channels[master_index].name
                             )
+                            master = self.get(group.attrs["master"], group_index)
+                            if reduce_memory_usage:
+                                master.timestamps = downcast(master.timestamps)
+                            if compression:
+                                dataset = group.create_dataset(
+                                    group.attrs["master"],
+                                    data=master.timestamps,
+                                    compression=compression,
+                                )
+                            else:
+                                dataset = group.create_dataset(
+                                    group.attrs["master"],
+                                    data=master.timestamps,
+                                    dtype=master.timestamps.dtype,
+                                )
+                            unit = master.unit.replace("\0", "")
+                            if unit:
+                                dataset.attrs["unit"] = unit
+                            comment = master.comment.replace("\0", "")
+                            if comment:
+                                dataset.attrs["comment"] = comment
 
                         channels = [
                             (None, gp_index, ch_index)
@@ -1490,6 +1560,10 @@ class MDF:
                     df.index = index
                     df.index.name = "timestamps"
 
+                    units["timestamps"] = ""
+                else:
+                    units["timestamps"] = "s"
+
                 if hasattr(self, "can_logging_db") and self.can_logging_db:
 
                     dropped = {}
@@ -1517,6 +1591,10 @@ class MDF:
                     names_row = [df.index.name, *df.columns]
                     writer.writerow(names_row)
 
+                    if kwargs.get("add_units", False):
+                        units_row = [units[name] for name in names_row]
+                        writer.writerow(units_row)
+
                     if reduce_memory_usage:
                         vals = [df.index, *(df[name] for name in df)]
                     else:
@@ -1536,6 +1614,8 @@ class MDF:
                             self._callback(i + 1 + count, count * 2)
 
             else:
+
+                add_units = kwargs.get("add_units", False)
 
                 filename = filename.with_suffix(".csv")
 
@@ -1579,6 +1659,38 @@ class MDF:
                         raw=raw,
                     )
 
+                    if add_units:
+                        units = {}
+                        used_names = UniqueDB()
+
+                        for gp_index, channel_indexes in self.included_channels(
+                            group_index
+                        )[group_index].items():
+                            for ch_index in channel_indexes:
+                                ch = self.groups[gp_index].channels[ch_index]
+
+                                if use_display_names:
+                                    channel_name = (
+                                        list(ch.display_names)[0]
+                                        if ch.display_names
+                                        else ch.name
+                                    )
+                                else:
+                                    channel_name = ch.name
+
+                                channel_name = used_names.get_unique_name(channel_name)
+
+                                if hasattr(ch, "unit"):
+                                    unit = ch.unit
+                                    if ch.conversion:
+                                        unit = unit or ch.conversion.unit
+                                else:
+                                    unit = ""
+
+                                units[channel_name] = unit
+                    else:
+                        units = {}
+
                     if time_as_date:
                         index = (
                             pd.to_datetime(
@@ -1590,6 +1702,10 @@ class MDF:
                         )
                         df.index = index
                         df.index.name = "timestamps"
+
+                        units["timestamps"] = ""
+                    else:
+                        units["timestamps"] = "s"
 
                     with open(group_csv_name, "w", newline="") as csvfile:
                         writer = csv.writer(csvfile, **fmtparams)
@@ -1616,6 +1732,10 @@ class MDF:
 
                         names_row = [df.index.name, *df.columns]
                         writer.writerow(names_row)
+
+                        if add_units:
+                            units_row = [units[name] for name in names_row]
+                            writer.writerow(units_row)
 
                         if reduce_memory_usage:
                             vals = [df.index, *(df[name] for name in df)]
@@ -1726,6 +1846,7 @@ class MDF:
 
             if self._callback:
                 self._callback(80, 100)
+
             if format == "7.3":
 
                 savemat(
@@ -2141,17 +2262,78 @@ class MDF:
 
             mdf.configure(copy_on_get=False)
 
+            reorder_channel_groups = False
+            cg_translations = {}
+
             if mdf_index == 0:
                 last_timestamps = [None for gp in mdf.virtual_groups]
                 groups_nr = len(last_timestamps)
+                first_mdf = mdf
+                input_types[0] = True
 
             else:
                 if len(mdf.virtual_groups) != groups_nr:
                     raise MdfException(
                         f"internal structure of file <{mdf.name}> is different; different channel groups count"
                     )
+                else:
+                    cg_translations = dict.fromkeys(range(0, groups_nr))
+
+                    make_translation = False
+
+                    # check if the order of the channel groups is the same
+                    for i, group_index in enumerate(mdf.virtual_groups):
+                        included_channels = mdf.included_channels(group_index)[
+                            group_index
+                        ]
+                        names = [
+                            mdf.groups[gp_index].channels[ch_index].name
+                            for gp_index, channels in included_channels.items()
+                            for ch_index in channels
+                        ]
+
+                        if names != included_channel_names[i]:
+                            if sorted(names) != sorted(included_channel_names[i]):
+                                make_translation = reorder_channel_groups = True
+                                break
+
+                    # Make a channel group translation dictionary if the order is different
+                    if make_translation:
+                        for i, org_group in enumerate(first_mdf.groups):
+
+                            org_group_source = org_group.channel_group.acq_source
+                            for j, new_group in enumerate(mdf.groups):
+                                new_group_source = new_group.channel_group.acq_source
+                                if (
+                                    new_group.channel_group.acq_name
+                                    == org_group.channel_group.acq_name
+                                    and (new_group_source and org_group_source)
+                                    and new_group_source.name == org_group_source.name
+                                    and new_group_source.path == org_group_source.path
+                                    and new_group.channel_group.samples_byte_nr
+                                    == org_group.channel_group.samples_byte_nr
+                                ):
+                                    new_included_channels = mdf.included_channels(j)[j]
+
+                                    new_names = [
+                                        mdf.groups[gp_index].channels[ch_index].name
+                                        for gp_index, channels in new_included_channels.items()
+                                        for ch_index in channels
+                                    ]
+
+                                    if sorted(new_names) == sorted(
+                                        included_channel_names[i]
+                                    ):
+                                        cg_translations[i] = j
+                                        break
 
             for i, group_index in enumerate(mdf.virtual_groups):
+                # save original group index for extension
+                # replace with the translated group index
+                if reorder_channel_groups:
+                    origin_gp_idx = group_index
+                    group_index = cg_translations[group_index]
+
                 included_channels = mdf.included_channels(group_index)[group_index]
 
                 if mdf_index == 0:
@@ -2281,6 +2463,9 @@ class MDF:
                                     )
                                 )
                             cg_nr = cg_map[group_index]
+                            # set the original channel group number back for extension
+                            if reorder_channel_groups:
+                                cg_nr = cg_map[origin_gp_idx]
                             merged.extend(cg_nr, signals)
 
                             if first_timestamp is None:
@@ -2295,6 +2480,9 @@ class MDF:
 
             if not input_types[mdf_index]:
                 mdf.close()
+
+            if (mdf_index + 1) == mdf_nr and not isinstance(files[0], MDF):
+                first_mdf.close()
 
             if callback:
                 callback(i + 1 + mdf_index * groups_nr, groups_nr * mdf_nr)
@@ -2488,7 +2676,7 @@ class MDF:
         return stacked
 
     def iter_channels(
-        self, skip_master: bool = True, copy_master: bool = True
+        self, skip_master: bool = True, copy_master: bool = True, raw: bool = False
     ) -> Iterator[Signal]:
         """generator that yields a *Signal* for each non-master channel
 
@@ -2497,7 +2685,9 @@ class MDF:
         skip_master : bool
             do not yield master channels; default *True*
         copy_master : bool
-            copy master for each yielded channel
+            copy master for each yielded channel *True*
+        raw : bool
+            return raw channels instead of converted; default *False*
 
         """
 
@@ -2511,7 +2701,7 @@ class MDF:
                 for ch_index in channel_indexes
             ]
 
-            channels = self.select(channels, copy_master=copy_master)
+            channels = self.select(channels, copy_master=copy_master, raw=raw)
 
             yield from channels
 
@@ -2810,6 +3000,10 @@ class MDF:
                 ].items()
                 for ch_index in channel_indexes
             ]
+
+            if not channels:
+                continue
+
             sigs = self.select(channels, raw=True)
 
             sigs = [
@@ -3055,6 +3249,13 @@ class MDF:
                 name = channel[0]
                 if name is not None:
                     signal.name = name
+
+        unique = set()
+        for i, signal in enumerate(signals):
+            obj_id = id(signal)
+            if id(signal) in unique:
+                signals[i] = signal.copy()
+            unique.add(obj_id)
 
         return signals
 
@@ -3891,9 +4092,9 @@ class MDF:
             df.index.name = "timestamps"
 
             if time_as_date:
-                new_index = np.array(df.index) + self.header.start_time.timestamp()
-                new_index = pd.to_datetime(new_index, unit="s")
+                delta = pd.to_timedelta(df.index, unit="s")
 
+                new_index = self.header.start_time + delta
                 df.set_index(new_index, inplace=True)
             elif time_from_zero and len(master):
                 df.set_index(df.index - df.index[0], inplace=True)
@@ -4270,14 +4471,11 @@ class MDF:
         df.index.name = "timestamps"
 
         if time_as_date:
-            new_index = np.array(df.index) + self.header.start_time.timestamp()
-            new_index = (
-                pd.to_datetime(new_index, unit="s")
-                .tz_localize("UTC")
-                .tz_convert(LOCAL_TIMEZONE)
-            )
+            delta = pd.to_timedelta(df.index, unit="s")
 
+            new_index = self.header.start_time + delta
             df.set_index(new_index, inplace=True)
+
         elif time_from_zero and len(master):
             df.set_index(df.index - df.index[0], inplace=True)
 
@@ -4450,7 +4648,13 @@ class MDF:
         for dbc, dbc_name, bus_channel in valid_dbc_files:
             is_j1939 = dbc.contains_j1939
             if is_j1939:
-                messages = {message.arbitration_id.pgn: message for message in dbc}
+                messages = {
+                    (
+                        message.arbitration_id.pgn,
+                        message.arbitration_id.j1939_source,
+                    ): message
+                    for message in dbc
+                }
             else:
                 messages = {message.arbitration_id.id: message for message in dbc}
 
@@ -4490,7 +4694,7 @@ class MDF:
                         & 0x1FFFFFFF
                     )
 
-                    original_ids = msg_ids.samples.copy()
+                    original_ids = msg_ids.samples & 0xFF
 
                     if is_j1939:
                         tmp_pgn = msg_ids.samples >> 8
@@ -4519,18 +4723,11 @@ class MDF:
 
                         if is_j1939:
 
-                            if consolidated_j1939:
-                                unique_ids = np.unique(
-                                    np.core.records.fromarrays(
-                                        [bus_msg_ids, bus_msg_ids]
-                                    )
+                            unique_ids = np.unique(
+                                np.core.records.fromarrays(
+                                    [bus_msg_ids, original_msg_ids]
                                 )
-                            else:
-                                unique_ids = np.unique(
-                                    np.core.records.fromarrays(
-                                        [bus_msg_ids, original_msg_ids]
-                                    )
-                                )
+                            )
                         else:
                             unique_ids = np.unique(
                                 np.core.records.fromarrays([bus_msg_ids, bus_msg_ids])
@@ -4543,26 +4740,43 @@ class MDF:
                         for msg_id_record in unique_ids:
                             msg_id = int(msg_id_record[0])
                             original_msg_id = int(msg_id_record[1])
-                            message = messages.get(msg_id, None)
-                            if message is None:
-                                unknown_ids[msg_id].append(True)
-                                continue
+                            if is_j1939:
+                                key = (msg_id, original_msg_id)
+                                message = messages.get(key, None)
+                                if message is None:
+                                    for (_pgn, _sa), _msg in messages.items():
+                                        if _pgn == msg_id and _sa == 0xFE:
+                                            message = _msg
+                                            break
 
-                            found_ids[dbc_name].add((msg_id, message.name))
+                                if message is None:
+                                    unknown_ids[key].append(True)
+                                    continue
+
+                            else:
+                                key = msg_id
+                                message = messages.get(key, None)
+
+                                if message is None:
+                                    unknown_ids[key].append(True)
+                                    continue
+
+                            found_ids[dbc_name].add((key, message.name))
                             try:
-                                current_not_found_ids.remove((msg_id, message.name))
+                                current_not_found_ids.remove((key, message.name))
                             except KeyError:
                                 pass
 
-                            unknown_ids[msg_id].append(False)
+                            unknown_ids[key].append(False)
 
-                            if is_j1939 and not consolidated_j1939:
+                            if is_j1939:
                                 idx = np.argwhere(
                                     (bus_msg_ids == msg_id)
                                     & (original_msg_ids == original_msg_id)
                                 ).ravel()
                             else:
                                 idx = np.argwhere(bus_msg_ids == msg_id).ravel()
+
                             payload = bus_data_bytes[idx]
                             t = bus_t[idx]
 
@@ -4573,7 +4787,7 @@ class MDF:
                                 bus,
                                 t,
                                 original_message_id=original_msg_id
-                                if is_j1939 and not consolidated_j1939
+                                if is_j1939
                                 else None,
                                 ignore_value2text_conversion=ignore_value2text_conversion,
                                 is_j1939=is_j1939,
@@ -4599,6 +4813,9 @@ class MDF:
                                             invalidation_bits=signal[
                                                 "invalidation_bits"
                                             ],
+                                            display_names={
+                                                f"CAN{bus}.{message.name}.{signal_name}": "display"
+                                            },
                                         )
 
                                         sig.comment = f"""\
@@ -4611,25 +4828,14 @@ class MDF:
                                         sigs.append(sig)
 
                                     if is_j1939:
-                                        if consolidated_j1939:
-                                            if prefix:
-                                                acq_name = (
-                                                    comment
-                                                ) = f"{prefix}: CAN{bus} consolidated PGN=0x{msg_id:X} {message}"
-                                            else:
-                                                acq_name = (
-                                                    comment
-                                                ) = f"CAN{bus} consolidated PGN=0x{msg_id:X} {message}"
-
+                                        source_adddress = original_msg_id
+                                        if prefix:
+                                            comment = f"{prefix}: CAN{bus} PGN=0x{msg_id:X} {message} PGN=0x{msg_id:X} SA=0x{source_adddress:X}"
                                         else:
-                                            source_adddress = original_msg_id & 0xFF
-                                            if prefix:
-                                                comment = f"{prefix}: CAN{bus} PGN=0x{msg_id:X} {message} from ID=0x{original_msg_id:X} SA=0x{source_adddress:X}"
-                                            else:
-                                                comment = f"CAN{bus} PGN=0x{msg_id:X} {message} from ID=0x{original_msg_id:X} SA=0x{source_adddress:X}"
-                                            acq_name = (
-                                                f"SourceAddress = 0x{source_adddress}"
-                                            )
+                                            comment = f"CAN{bus} PGN=0x{msg_id:X} {message} PGN=0x{msg_id:X} SA=0x{source_adddress:X}"
+                                        acq_name = (
+                                            f"SourceAddress = 0x{source_adddress}"
+                                        )
                                     else:
 
                                         if prefix:
@@ -4901,13 +5107,16 @@ class MDF:
                                             invalidation_bits=signal[
                                                 "invalidation_bits"
                                             ],
+                                            display_names={
+                                                f"LIN{bus}.{message.name}.{signal_name}": "display"
+                                            },
                                         )
 
                                         sig.comment = f"""\
 <CNcomment>
     <TX>{sig.comment}</TX>
     <names>
-        <display>LIN.{message.name}.{signal_name}</display>
+        <display>LIN{bus}.{message.name}.{signal_name}</display>
     </names>
 </CNcomment>"""
                                         sigs.append(sig)

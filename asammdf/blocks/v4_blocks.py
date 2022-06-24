@@ -17,6 +17,8 @@ from traceback import format_exc
 from typing import Any, TYPE_CHECKING
 import xml.etree.ElementTree as ET
 
+import dateutil.tz
+
 try:
     from isal.isal_zlib import compress, decompress
 
@@ -2358,6 +2360,7 @@ class ChannelConversion(_ChannelConversionBase):
     """
 
     def __init__(self, **kwargs) -> None:
+        self._cache = None
 
         if "stream" in kwargs:
             stream = kwargs["stream"]
@@ -3191,7 +3194,7 @@ class ChannelConversion(_ChannelConversionBase):
 
         return address
 
-    def convert(self, values):
+    def convert(self, values, as_object=False):
         if not isinstance(values, np.ndarray):
             values = np.array(values)
         conversion_type = self.conversion_type
@@ -3344,16 +3347,22 @@ class ChannelConversion(_ChannelConversionBase):
             values = new_values
 
         elif conversion_type == v4c.CONVERSION_TYPE_TABX:
-            nr = self.val_param_nr
-            raw_vals = [self[f"val_{i}"] for i in range(nr)]
+            if self._cache is None:
+                nr = self.val_param_nr
+                raw_vals = [self[f"val_{i}"] for i in range(nr)]
 
-            phys = [self.referenced_blocks[f"text_{i}"] for i in range(nr)]
+                phys = [self.referenced_blocks[f"text_{i}"] for i in range(nr)]
+
+                x = sorted(zip(raw_vals, phys))
+                raw_vals = np.array([e[0] for e in x], dtype="<i8")
+                phys = [e[1] for e in x]
+
+                self._cache = {"phys": phys, "raw_vals": raw_vals}
+            else:
+                phys = self._cache["phys"]
+                raw_vals = self._cache["raw_vals"]
 
             default = self.referenced_blocks["default_addr"]
-
-            x = sorted(zip(raw_vals, phys))
-            raw_vals = np.array([e[0] for e in x], dtype="<i8")
-            phys = [e[1] for e in x]
 
             names = values.dtype.names
 
@@ -3361,14 +3370,14 @@ class ChannelConversion(_ChannelConversionBase):
                 name = names[0]
                 vals = values[name]
                 shape = vals.shape
-                vals = vals.flatten()
+                vals = vals.ravel()
 
                 ret = np.full(len(vals), None, "O")
 
                 idx1 = np.searchsorted(raw_vals, vals, side="right") - 1
                 idx2 = np.searchsorted(raw_vals, vals, side="left")
 
-                idx = np.argwhere(idx1 != idx2).flatten()
+                idx = np.argwhere(idx1 != idx2).ravel()
 
                 if isinstance(default, bytes):
                     ret[idx] = default
@@ -3379,10 +3388,10 @@ class ChannelConversion(_ChannelConversionBase):
                 if idx.size:
                     indexes = idx1[idx]
                     unique = np.unique(indexes)
-                    for val in unique:
+                    for val in unique.tolist():
 
                         item = phys[val]
-                        idx_ = np.argwhere(indexes == val).flatten()
+                        idx_ = np.argwhere(indexes == val).ravel()
                         if isinstance(item, bytes):
                             ret[idx[idx_]] = item
                         else:
@@ -3398,9 +3407,10 @@ class ChannelConversion(_ChannelConversionBase):
                     try:
                         ret = ret.astype("f8")
                     except:
-                        ret = np.array(
-                            [np.nan if isinstance(v, bytes) else v for v in ret]
-                        )
+                        if not as_object:
+                            ret = np.array(
+                                [np.nan if isinstance(v, bytes) else v for v in ret]
+                            )
 
                 else:
                     ret = ret.astype(bytes)
@@ -3436,8 +3446,12 @@ class ChannelConversion(_ChannelConversionBase):
 
                     if idx.size:
                         indexes = idx1[idx]
-                        unique = np.unique(indexes)
-                        for val in unique.tolist():
+
+                        if indexes.size <= 300:
+                            unique = sorted(set(indexes.tolist()))
+                        else:
+                            unique = np.unique(indexes).tolist()
+                        for val in unique:
 
                             item = phys[val]
                             idx_ = np.argwhere(indexes == val).ravel()
@@ -3450,8 +3464,11 @@ class ChannelConversion(_ChannelConversionBase):
                     # all the raw values are found in the conversion table
 
                     if idx1.size:
-                        unique = np.unique(idx1)
-                        for val in unique.tolist():
+                        if idx1.size <= 300:
+                            unique = sorted(set(idx1.tolist()))
+                        else:
+                            unique = np.unique(idx1).tolist()
+                        for val in unique:
 
                             item = phys[val]
                             idx_ = np.argwhere(idx1 == val).ravel()
@@ -3466,29 +3483,42 @@ class ChannelConversion(_ChannelConversionBase):
                     try:
                         ret = ret.astype("<f8")
                     except:
-                        ret = np.array(
-                            [
-                                np.nan if isinstance(v, bytes) else v
-                                for v in ret.tolist()
-                            ]
-                        )
+                        if not as_object:
+                            ret = np.array(
+                                [
+                                    np.nan if isinstance(v, bytes) else v
+                                    for v in ret.tolist()
+                                ]
+                            )
 
                 values = ret
 
         elif conversion_type == v4c.CONVERSION_TYPE_RTABX:
-            nr = self.val_param_nr // 2
 
-            phys = [self.referenced_blocks[f"text_{i}"] for i in range(nr)]
+            if self._cache is None:
+                nr = self.val_param_nr // 2
+
+                phys = [self.referenced_blocks[f"text_{i}"] for i in range(nr)]
+
+                lower = [self[f"lower_{i}"] for i in range(nr)]
+                upper = [self[f"upper_{i}"] for i in range(nr)]
+
+                x = sorted(zip(lower, upper, phys))
+                lower = np.array([e[0] for e in x], dtype="<i8")
+                upper = np.array([e[1] for e in x], dtype="<i8")
+                phys = [e[2] for e in x]
+
+                self._cache = {
+                    "phys": phys,
+                    "lower": lower,
+                    "upper": upper,
+                }
+            else:
+                phys = self._cache["phys"]
+                lower = self._cache["lower"]
+                upper = self._cache["upper"]
 
             default = self.referenced_blocks["default_addr"]
-
-            lower = [self[f"lower_{i}"] for i in range(nr)]
-            upper = [self[f"upper_{i}"] for i in range(nr)]
-
-            x = sorted(zip(lower, upper, phys))
-            lower = np.array([e[0] for e in x], dtype="<i8")
-            upper = np.array([e[1] for e in x], dtype="<i8")
-            phys = [e[2] for e in x]
 
             ret = np.full(values.size, None, "O")
 
@@ -3509,7 +3539,7 @@ class ChannelConversion(_ChannelConversionBase):
                 for val in unique:
 
                     item = phys[val]
-                    idx_ = np.argwhere(indexes == val).flatten()
+                    idx_ = np.argwhere(indexes == val).ravel()
 
                     if isinstance(item, bytes):
                         ret[idx_eq[idx_]] = item
@@ -3517,7 +3547,6 @@ class ChannelConversion(_ChannelConversionBase):
                         try:
                             ret[idx_eq[idx_]] = item.convert(values[idx_eq[idx_]])
                         except:
-                            print(self)
                             raise
 
             try:
@@ -3526,7 +3555,10 @@ class ChannelConversion(_ChannelConversionBase):
                 try:
                     ret = ret.astype("<f8")
                 except:
-                    ret = np.array([np.nan if isinstance(v, bytes) else v for v in ret])
+                    if not as_object:
+                        ret = np.array(
+                            [np.nan if isinstance(v, bytes) else v for v in ret]
+                        )
 
             values = ret
 
@@ -5251,40 +5283,13 @@ class HeaderBlock:
 
     """
 
-    __slots__ = (
-        "address",
-        "comment",
-        "author",
-        "department",
-        "project",
-        "subject",
-        "id",
-        "reserved0",
-        "block_len",
-        "links_nr",
-        "first_dg_addr",
-        "file_history_addr",
-        "channel_tree_addr",
-        "first_attachment_addr",
-        "first_event_addr",
-        "comment_addr",
-        "abs_time",
-        "tz_offset",
-        "daylight_save_time",
-        "time_flags",
-        "time_quality",
-        "flags",
-        "reserved1",
-        "start_angle",
-        "start_distance",
-    )
-
     def __init__(self, **kwargs) -> None:
         super().__init__()
 
-        self.comment = ""
+        self._common_properties = {}
+        self.description = ""
 
-        self.author = self.project = self.subject = self.department = ""
+        self.comment = ""
 
         try:
             self.address = address = kwargs["address"]
@@ -5346,25 +5351,95 @@ class HeaderBlock:
 
             self.start_time = datetime(1980, 1, 1)
 
-        if self.comment.startswith("<HDcomment"):
-            comment = self.comment
+    @property
+    def comment(self):
+        root = ET.Element("HDcomment")
+        text = ET.SubElement(root, "TX")
+        text.text = self.description
+        common = ET.SubElement(root, "common_properties")
+        for name, value in self._common_properties.items():
+            if isinstance(value, dict):
+                tree = ET.SubElement(common, "tree", name=name)
+                for subname, subvalue in value.items():
+                    ET.SubElement(tree, "e", name=subname).text = subvalue
+            else:
+                ET.SubElement(common, "e", name=name).text = value
+
+        return (
+            ET.tostring(root, encoding="utf8", method="xml")
+            .replace(b"<?xml version='1.0' encoding='utf8'?>\n", b"")
+            .decode("utf-8")
+        )
+
+    @comment.setter
+    def comment(self, string):
+        self._common_properties.clear()
+
+        if string.startswith("<HDcomment"):
+            comment = string
             try:
-                comment_xml = ET.fromstring(comment)
+                comment_xml = ET.fromstring(
+                    comment.replace(' xmlns="http://www.asam.net/mdf/v4"', "")
+                )
             except ET.ParseError as e:
+                self.description = string
                 logger.error(f"could not parse header block comment; {e}")
             else:
+                description = comment_xml.find(".//TX")
+                if description is None:
+                    self.description = ""
+                else:
+                    self.description = description.text or ""
+
                 common_properties = comment_xml.find(".//common_properties")
                 if common_properties is not None:
                     for e in common_properties:
-                        name = e.get("name")
-                        if name == "author":
-                            self.author = e.text
-                        elif name == "department":
-                            self.department = e.text
-                        elif name == "project":
-                            self.project = e.text
-                        elif name == "subject":
-                            self.subject = e.text
+                        if e.tag == "e":
+                            name = e.get("name")
+                            self._common_properties[name] = e.text or ""
+                        else:
+                            name = e.get("name")
+                            subattibutes = {}
+                            tree = e
+                            self._common_properties[name] = subattibutes
+
+                            for e in tree:
+                                name = e.get("name")
+                                subattibutes[name] = e.text or ""
+        else:
+            self.description = string
+
+    @property
+    def author(self):
+        return self._common_properties.get("author", "")
+
+    @author.setter
+    def author(self, value):
+        self._common_properties["author"] = value
+
+    @property
+    def project(self):
+        return self._common_properties.get("project", "")
+
+    @project.setter
+    def project(self, value):
+        self._common_properties["project"] = value
+
+    @property
+    def department(self):
+        return self._common_properties.get("department", "")
+
+    @department.setter
+    def department(self, value):
+        self._common_properties["department"] = value
+
+    @property
+    def subject(self):
+        return self._common_properties.get("subject", "")
+
+    @subject.setter
+    def subject(self, value):
+        self._common_properties["subject"] = value
 
     def __getitem__(self, item: str) -> Any:
         return self.__getattribute__(item)
@@ -5385,17 +5460,17 @@ class HeaderBlock:
 
         timestamp = self.abs_time / 10**9
         if self.time_flags & v4c.FLAG_HD_LOCAL_TIME:
-            try:
-                timestamp = datetime.fromtimestamp(timestamp)
-            except OverflowError:
-                timestamp = datetime.fromtimestamp(0) + timedelta(seconds=timestamp)
+            tz = dateutil.tz.tzlocal()
         else:
-            try:
-                timestamp = datetime.fromtimestamp(timestamp, timezone.utc)
-            except OverflowError:
-                timestamp = datetime.fromtimestamp(0, timezone.utc) + timedelta(
-                    seconds=timestamp
-                )
+            tz = timezone.utc
+            timestamp += self.tz_offset * 60 + self.daylight_save_time * 60
+
+        try:
+            timestamp = datetime.fromtimestamp(timestamp, tz)
+
+        except OverflowError:
+            timestamp = datetime.fromtimestamp(0, tz) + timedelta(seconds=timestamp)
+
         return timestamp
 
     @start_time.setter
@@ -5403,94 +5478,63 @@ class HeaderBlock:
 
         if timestamp.tzinfo is None:
             self.time_flags = v4c.FLAG_HD_LOCAL_TIME
-        else:
-            self.time_flags = 0
-            timestamp = timestamp.astimezone(timezone.utc)
+            self.abs_time = int(timestamp.timestamp() * 10**9)
+            self.tz_offset = 0
+            self.daylight_save_time = 0
 
-        timestamp = int(timestamp.timestamp() * 10**9)
-        self.abs_time = timestamp
-        self.tz_offset = 0
-        self.daylight_save_time = 0
+        else:
+            self.time_flags = v4c.FLAG_HD_TIME_OFFSET_VALID
+
+            tzinfo = timestamp.tzinfo
+
+            dst = tzinfo.dst(timestamp)
+            if dst is not None:
+                dst = int(tzinfo.dst(timestamp).total_seconds() / 60)
+            else:
+                dst = 0
+            tz_offset = int(tzinfo.utcoffset(timestamp).total_seconds() / 60) - dst
+
+            self.tz_offset = tz_offset
+            self.daylight_save_time = dst
+            self.abs_time = int(timestamp.timestamp() * 10**9)
+
+    def start_time_string(self):
+        if self.time_flags & v4c.FLAG_HD_TIME_OFFSET_VALID:
+            tz_offset = self.tz_offset / 60
+            tz_offset_sign = "-" if tz_offset < 0 else "+"
+
+            dst_offset = self.daylight_save_time / 60
+            dst_offset_sign = "-" if dst_offset < 0 else "+"
+
+            tz_information = f"[GMT{tz_offset_sign}{tz_offset:.2f} DST{dst_offset_sign}{dst_offset:.2f}h]"
+        else:
+            tzinfo = self.start_time.tzinfo
+
+            dst = tzinfo.dst(self.start_time)
+            if dst is not None:
+                dst = int(tzinfo.dst(self.start_time).total_seconds() / 3600)
+            else:
+                dst = 0
+            tz_offset = (
+                int(tzinfo.utcoffset(self.start_time).total_seconds() / 3600) - dst
+            )
+
+            tz_offset_sign = "-" if tz_offset < 0 else "+"
+
+            dst_offset = dst
+            dst_offset_sign = "-" if dst_offset < 0 else "+"
+
+            tz_information = f"[assumed GMT{tz_offset_sign}{tz_offset:.2f} DST{dst_offset_sign}{dst_offset:.2f}h]"
+
+        start_time = f'local time = {self.start_time.strftime("%d-%b-%Y %H:%M:%S + %fu")} {tz_information}'
+        return start_time
 
     def to_blocks(self, address: int, blocks: list[Any]) -> int:
         blocks.append(self)
         self.address = address
         address += self.block_len
 
-        if self.comment.startswith("<HDcomment"):
-            comment = self.comment
-            comment = ET.fromstring(comment)
-            common_properties = comment.find(".//common_properties")
-            if common_properties is not None:
-                for e in common_properties:
-                    name = e.get("name")
-                    if name == "author":
-                        e.text = self.author
-                        break
-                else:
-                    author = ET.SubElement(
-                        common_properties, "e", name="author"
-                    ).text = self.author
-
-                for e in common_properties:
-                    name = e.get("name")
-                    if name == "department":
-                        e.text = self.department
-                        break
-                else:
-                    department = ET.SubElement(
-                        common_properties, "e", name="department"
-                    ).text = self.department
-
-                for e in common_properties:
-                    name = e.get("name")
-                    if name == "project":
-                        e.text = self.author
-                        break
-                else:
-                    project = ET.SubElement(
-                        common_properties, "e", name="project"
-                    ).text = self.project
-
-                for e in common_properties:
-                    name = e.get("name")
-                    if name == "subject":
-                        e.text = self.author
-                        break
-                else:
-                    subject = ET.SubElement(
-                        common_properties, "e", name="subject"
-                    ).text = self.subject
-
-            else:
-                common_properties = ET.SubElement(comment, "common_properties")
-                author = ET.SubElement(
-                    common_properties, "e", name="author"
-                ).text = self.author
-                department = ET.SubElement(
-                    common_properties, "e", name="department"
-                ).text = self.department
-                project = ET.SubElement(
-                    common_properties, "e", name="project"
-                ).text = self.project
-                subject = ET.SubElement(
-                    common_properties, "e", name="subject"
-                ).text = self.subject
-
-            comment = ET.tostring(comment, encoding="utf8", method="xml").replace(
-                b"<?xml version='1.0' encoding='utf8'?>\n", b""
-            )
-
-        else:
-            comment = v4c.HD_COMMENT_TEMPLATE.format(
-                escape_xml_string(self.comment),
-                escape_xml_string(self.author),
-                escape_xml_string(self.department),
-                escape_xml_string(self.project),
-                escape_xml_string(self.subject),
-            )
-
-        tx_block = TextBlock(text=comment, meta=True)
+        tx_block = TextBlock(text=self.comment, meta=True)
         self.comment_addr = address
         tx_block.address = address
         address += tx_block.block_len

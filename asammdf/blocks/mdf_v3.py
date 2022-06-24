@@ -214,6 +214,10 @@ class MDF3(MDF_Common):
         self._use_display_names = kwargs.get(
             "use_display_names", get_global_option("use_display_names")
         )
+        self._fill_0_for_missing_computation_channels = kwargs.get(
+            "fill_0_for_missing_computation_channels",
+            get_global_option("fill_0_for_missing_computation_channels"),
+        )
         self.copy_on_get = False
 
         self._si_map = {}
@@ -840,6 +844,13 @@ class MDF3(MDF_Common):
                             )
                             raise MdfException(message)
 
+                        if self._remove_source_from_channel_names:
+                            name = name.split("\\", 1)[0]
+                            display_names = {
+                                _name.split("\\", 1)[0]: val
+                                for _name, val in display_names.items()
+                            }
+
                         if (
                             channel_type == v23c.CHANNEL_TYPE_MASTER
                             or name in self.load_filter
@@ -870,6 +881,10 @@ class MDF3(MDF_Common):
                             cc_map=self._cc_map,
                             parsed_strings=None,
                         )
+
+                    if new_ch.data_type not in v23c.VALID_DATA_TYPES:
+                        ch_addr = new_ch.next_ch_addr
+                        continue
 
                     if self._remove_source_from_channel_names:
                         new_ch.name = new_ch.name.split("\\", 1)[0]
@@ -3916,6 +3931,9 @@ class MDF3(MDF_Common):
 
             self._set_temporary_master(None)
             yield signals
+
+    def reload_header(self):
+        self.header = HeaderBlock(address=0x40, stream=self._file)
 
 
 if __name__ == "__main__":

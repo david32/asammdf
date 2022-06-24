@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from getpass import getuser
 import logging
 from struct import pack, unpack, unpack_from
@@ -12,7 +12,9 @@ import sys
 from textwrap import wrap
 from traceback import format_exc
 from typing import Any
+import xml.etree.ElementTree as ET
 
+import dateutil
 from numexpr import evaluate
 
 try:
@@ -23,7 +25,14 @@ import numpy as np
 
 from . import v2_v3_constants as v23c
 from ..version import __version__
-from .utils import get_fields, get_text_v3, MdfException, UINT16_u, UINT16_uf
+from .utils import (
+    escape_xml_string,
+    get_fields,
+    get_text_v3,
+    MdfException,
+    UINT16_u,
+    UINT16_uf,
+)
 
 SEEK_START = v23c.SEEK_START
 SEEK_END = v23c.SEEK_END
@@ -145,6 +154,7 @@ class Channel:
         "display_names",
         "comment",
         "conversion",
+        "unit",
         "source",
         "address",
         "id",
@@ -173,7 +183,7 @@ class Channel:
     def __init__(self, **kwargs) -> None:
         super().__init__()
 
-        self.name = self.comment = ""
+        self.name = self.comment = self.unit = ""
         self.display_names = {}
         self.conversion = self.source = None
         self.dtype_fmt = None
@@ -1457,7 +1467,7 @@ address: {hex(self.address)}
 
         return "\n".join(metadata)
 
-    def convert(self, values):
+    def convert(self, values, as_object=False):
         conversion_type = self.conversion_type
 
         if conversion_type == v23c.CONVERSION_TYPE_NONE:
@@ -2728,37 +2738,13 @@ class HeaderBlock:
 
     """
 
-    __slots__ = (
-        "address",
-        "program",
-        "comment",
-        "id",
-        "block_len",
-        "first_dg_addr",
-        "comment_addr",
-        "program_addr",
-        "dg_nr",
-        "date",
-        "time",
-        "author",
-        "department",
-        "project",
-        "subject",
-        "abs_time",
-        "tz_offset",
-        "time_quality",
-        "timer_identification",
-        "author_field",
-        "department_field",
-        "project_field",
-        "subject_field",
-    )
-
     def __init__(self, **kwargs) -> None:
         super().__init__()
 
         self.address = 64
         self.program = None
+        self._common_properties = {}
+        self.description = ""
         self.comment = ""
         try:
 
@@ -2827,12 +2813,101 @@ class HeaderBlock:
                     "Local PC Reference Time"
                 ).encode("latin-1")
 
-            self.start_time = datetime(1980, 1, 1)
+            self.start_time = datetime(1980, 1, 1, tzinfo=timezone.utc)
 
         self.author = self.author_field.strip(b" \r\n\t\0").decode("latin-1")
         self.department = self.department_field.strip(b" \r\n\t\0").decode("latin-1")
         self.project = self.project_field.strip(b" \r\n\t\0").decode("latin-1")
         self.subject = self.subject_field.strip(b" \r\n\t\0").decode("latin-1")
+
+    @property
+    def comment(self):
+        root = ET.Element("HDcomment")
+        text = ET.SubElement(root, "TX")
+        text.text = self.description
+        common = ET.SubElement(root, "common_properties")
+        for name, value in self._common_properties.items():
+            if isinstance(value, dict):
+                tree = ET.SubElement(common, "tree", name=name)
+                for subname, subvalue in value.items():
+                    ET.SubElement(tree, "e", name=subname).text = subvalue
+            else:
+                ET.SubElement(common, "e", name=name).text = value
+
+        return (
+            ET.tostring(root, encoding="utf8", method="xml")
+            .replace(b"<?xml version='1.0' encoding='utf8'?>\n", b"")
+            .decode("utf-8")
+        )
+
+    @comment.setter
+    def comment(self, string):
+        self._common_properties.clear()
+
+        if string.startswith("<HDcomment"):
+            comment = string
+            try:
+                comment_xml = ET.fromstring(
+                    comment.replace(' xmlns="http://www.asam.net/mdf/v4"', "")
+                )
+            except ET.ParseError as e:
+                self.description = string
+            else:
+                description = comment_xml.find(".//TX")
+                if description is None:
+                    self.description = ""
+                else:
+                    self.description = description.text or ""
+
+                common_properties = comment_xml.find(".//common_properties")
+                if common_properties is not None:
+                    for e in common_properties:
+                        if e.tag == "e":
+                            name = e.get("name")
+                            self._common_properties[name] = e.text or ""
+                        else:
+                            name = e.get("name")
+                            subattibutes = {}
+                            tree = e
+                            self._common_properties[name] = subattibutes
+
+                            for e in tree:
+                                name = e.get("name")
+                                subattibutes[name] = e.text or ""
+        else:
+            self.description = string
+
+    @property
+    def author(self):
+        return self._common_properties.get("author", "")
+
+    @author.setter
+    def author(self, value):
+        self._common_properties["author"] = value
+
+    @property
+    def project(self):
+        return self._common_properties.get("project", "")
+
+    @project.setter
+    def project(self, value):
+        self._common_properties["project"] = value
+
+    @property
+    def department(self):
+        return self._common_properties.get("department", "")
+
+    @department.setter
+    def department(self, value):
+        self._common_properties["department"] = value
+
+    @property
+    def subject(self):
+        return self._common_properties.get("subject", "")
+
+    @subject.setter
+    def subject(self, value):
+        self._common_properties["subject"] = value
 
     def to_blocks(
         self,
@@ -2889,35 +2964,71 @@ class HeaderBlock:
 
         if self.block_len > v23c.HEADER_COMMON_SIZE:
             if self.abs_time:
-                timestamp = self.abs_time / 10**9
+                timestamp = self.abs_time / 10**9 + self.tz_offset * 3600
                 try:
-                    timestamp = datetime.fromtimestamp(timestamp)
+                    timestamp = datetime.fromtimestamp(timestamp, timezone.utc)
+                except OverflowError:
+                    timestamp = datetime.fromtimestamp(0, timezone.utc) + timedelta(
+                        seconds=timestamp
+                    )
                 except OSError:
-                    timestamp = datetime.now()
+                    timestamp = datetime.now(timezone.utc)
             else:
                 timestamp = "{} {}".format(
                     self.date.decode("ascii"), self.time.decode("ascii")
                 )
 
-                timestamp = datetime.strptime(timestamp, "%d:%m:%Y %H:%M:%S")
+                timestamp = datetime.strptime(
+                    timestamp, "%d:%m:%Y %H:%M:%S"
+                ).astimezone(timezone.utc)
 
         else:
             timestamp = "{} {}".format(
                 self.date.decode("ascii"), self.time.decode("ascii")
             )
 
-            timestamp = datetime.strptime(timestamp, "%d:%m:%Y %H:%M:%S")
+            timestamp = datetime.strptime(timestamp, "%d:%m:%Y %H:%M:%S").astimezone(
+                timezone.utc
+            )
 
         return timestamp
 
     @start_time.setter
     def start_time(self, timestamp: datetime) -> None:
+        if timestamp.tzinfo is None:
+            # the user provided a naive datetime
+            # use the local time zone
+            tzinfo = dateutil.tz.tzlocal()
+            timestamp = datetime.fromtimestamp(timestamp.timestamp(), tzinfo)
+
         self.date = timestamp.strftime("%d:%m:%Y").encode("ascii")
         self.time = timestamp.strftime("%H:%M:%S").encode("ascii")
         if self.block_len > v23c.HEADER_COMMON_SIZE:
+            self.tz_offset = int(
+                timestamp.tzinfo.utcoffset(timestamp).total_seconds() / 3600
+            )
             timestamp = int(timestamp.timestamp() * 10**9)
             self.abs_time = timestamp
-            self.tz_offset = 0
+
+    def start_time_string(self):
+        tzinfo = self.start_time.tzinfo
+
+        dst = tzinfo.dst(self.start_time)
+        if dst is not None:
+            dst = int(tzinfo.dst(self.start_time).total_seconds() / 3600)
+        else:
+            dst = 0
+        tz_offset = int(tzinfo.utcoffset(self.start_time).total_seconds() / 3600) - dst
+
+        tz_offset_sign = "-" if tz_offset < 0 else "+"
+
+        dst_offset = dst
+        dst_offset_sign = "-" if dst_offset < 0 else "+"
+
+        tz_information = f"[GMT{tz_offset_sign}{tz_offset:.2f} DST{dst_offset_sign}{dst_offset:.2f}h]"
+
+        start_time = f'local time = {self.start_time.strftime("%d-%b-%Y %H:%M:%S + %fu")} {tz_information}'
+        return start_time
 
     def __getitem__(self, item: str) -> Any:
         return self.__getattribute__(item)

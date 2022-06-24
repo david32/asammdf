@@ -99,9 +99,9 @@ from .utils import (
     count_channel_groups,
     DataBlockInfo,
     debug_channel,
-    extract_cncomment_xml,
     extract_display_names,
     extract_encryption_information,
+    extract_xml_comment,
     fmt_to_datatype_v4,
     get_fmt_v4,
     get_text_v4,
@@ -155,6 +155,7 @@ COMMON_uf = v4c.COMMON_uf
 COMMON_SHORT_SIZE = v4c.COMMON_SHORT_SIZE
 COMMON_SHORT_uf = v4c.COMMON_SHORT_uf
 COMMON_SHORT_u = v4c.COMMON_SHORT_u
+VALID_DATA_TYPES = v4c.VALID_DATA_TYPES
 
 EMPTY_TUPLE = tuple()
 
@@ -322,6 +323,10 @@ class MDF4(MDF_Common):
         self._use_display_names = kwargs.get(
             "use_display_names", get_global_option("use_display_names")
         )
+        self._fill_0_for_missing_computation_channels = kwargs.get(
+            "fill_0_for_missing_computation_channels",
+            get_global_option("fill_0_for_missing_computation_channels"),
+        )
 
         self._remove_source_from_channel_names = kwargs.get(
             "remove_source_from_channel_names", False
@@ -475,7 +480,7 @@ class MDF4(MDF_Common):
 
         self.identification = FileIdentificationBlock(stream=stream, mapped=mapped)
         version = self.identification["version_str"]
-        self.version = version.decode("utf-8").strip(" \n\t\0")
+        self.version = version.decode("utf-8").strip(" \n\t\r\0")
 
         if self.version >= "4.10":
             # Check for finalization past version 4.10
@@ -906,6 +911,13 @@ class MDF4(MDF_Common):
                     message = f'Expected "##CN" block @{hex(ch_addr)} but found "{id_}"'
                     raise MdfException(message)
 
+                if self._remove_source_from_channel_names:
+                    name = name.split(path_separator, 1)[0]
+                    display_names = {
+                        _name.split(path_separator, 1)[0]: val
+                        for _name, val in display_names.items()
+                    }
+
                 if (
                     channel_composition
                     or channel_type in v4c.MASTER_TYPES
@@ -971,6 +983,10 @@ class MDF4(MDF_Common):
                     file_limit=self.file_limit,
                     parsed_strings=None,
                 )
+
+            if channel.data_type not in VALID_DATA_TYPES:
+                ch_addr = channel.next_ch_addr
+                continue
 
             if channel.channel_type == v4c.CHANNEL_TYPE_SYNC:
                 channel.attachment = self._attachments_map.get(
@@ -2744,114 +2760,231 @@ class MDF4(MDF_Common):
                 # compute additional byte offset for large records size
                 s_type, s_size = fmt_to_datatype_v4(sig_dtype, sig_shape)
 
-                byte_size = s_size // 8 or 1
-                data_block_addr = 0
+                if (s_type, s_size) == (v4c.DATA_TYPE_BYTEARRAY, 0):
+                    offsets = arange(len(samples), dtype=uint64) * (sig_shape[1] + 4)
 
-                if sig_dtype.kind == "u" and signal.bit_count <= 4:
-                    s_size = signal.bit_count
+                    values = [
+                        full(len(samples), sig_shape[1], dtype=uint32),
+                        samples,
+                    ]
 
-                if signal.stream_sync:
-                    channel_type = v4c.CHANNEL_TYPE_SYNC
-                    if signal.attachment:
-                        at_data, at_name, hash_sum = signal.attachment
-                        attachment_index = self.attach(
-                            at_data, at_name, hash_sum, mime="video/avi", embedded=False
+                    types_ = [("o", uint32), ("s", sig_dtype, sig_shape[1:])]
+
+                    data = fromarrays(values, dtype=types_)
+
+                    data_size = len(data) * data.itemsize
+                    if data_size:
+                        data_addr = tell()
+                        info = SignalDataBlockInfo(
+                            address=data_addr,
+                            compressed_size=data_size,
+                            original_size=data_size,
+                            location=v4c.LOCATION_TEMPORARY_FILE,
                         )
-                        attachment = attachment_index
-                    else:
-                        attachment = None
-
-                    sync_type = v4c.SYNC_TYPE_TIME
-                else:
-                    channel_type = v4c.CHANNEL_TYPE_VALUE
-                    sync_type = v4c.SYNC_TYPE_NONE
-
-                    if signal.attachment:
-                        at_data, at_name, hash_sum = signal.attachment
-
-                        attachment_index = self.attach(at_data, at_name, hash_sum)
-                        attachment = attachment_index
-                    else:
-                        attachment = None
-
-                kwargs = {
-                    "channel_type": channel_type,
-                    "sync_type": sync_type,
-                    "bit_count": s_size,
-                    "byte_offset": offset,
-                    "bit_offset": 0,
-                    "data_type": s_type,
-                    "data_block_addr": data_block_addr,
-                    "flags": 0,
-                }
-
-                if attachment is not None:
-                    kwargs["attachment_addr"] = 0
-
-                if invalidation_bytes_nr and signal.invalidation_bits is not None:
-                    inval_bits.append(signal.invalidation_bits)
-                    kwargs["flags"] = v4c.FLAG_CN_INVALIDATION_PRESENT
-                    kwargs["pos_invalidation_bit"] = inval_cntr
-                    inval_cntr += 1
-
-                ch = Channel(**kwargs)
-                ch.name = name
-                ch.unit = signal.unit
-                ch.comment = signal.comment
-                ch.display_names = signal.display_names
-                if len(sig_shape) > 1:
-                    ch.dtype_fmt = dtype((sig_dtype, sig_shape[1:]))
-                else:
-                    ch.dtype_fmt = sig_dtype
-                ch.attachment = attachment
-
-                # conversions for channel
-                if signal.raw:
-                    ch.conversion = conversion_transfer(signal.conversion, version=4)
-
-                # source for channel
-
-                source = signal.source
-                if source:
-                    if source in si_map:
-                        ch.source = si_map[source]
-                    else:
-                        new_source = SourceInformation(
-                            source_type=source.source_type, bus_type=source.bus_type
+                        gp_sdata.append(
+                            (
+                                [info],
+                                iter(EMPTY_TUPLE),
+                            )
                         )
-                        new_source.name = source.name
-                        new_source.path = source.path
-                        new_source.comment = source.comment
+                        data.tofile(file)
+                    else:
+                        data_addr = 0
+                        gp_sdata.append(
+                            (
+                                [],
+                                iter(EMPTY_TUPLE),
+                            )
+                        )
 
-                        si_map[source] = new_source
+                    byte_size = 8
+                    kwargs = {
+                        "channel_type": v4c.CHANNEL_TYPE_VLSD,
+                        "bit_count": 64,
+                        "byte_offset": offset,
+                        "bit_offset": 0,
+                        "data_type": s_type,
+                        "data_block_addr": data_addr,
+                        "flags": 0,
+                    }
 
-                        ch.source = new_source
+                    if invalidation_bytes_nr:
+                        if signal.invalidation_bits is not None:
+                            inval_bits.append(signal.invalidation_bits)
+                            kwargs["flags"] |= v4c.FLAG_CN_INVALIDATION_PRESENT
+                            kwargs["pos_invalidation_bit"] = inval_cntr
+                            inval_cntr += 1
 
-                gp_channels.append(ch)
+                    ch = Channel(**kwargs)
+                    ch.name = name
+                    ch.unit = signal.unit
+                    ch.comment = signal.comment
+                    ch.display_names = signal.display_names
+                    ch.dtype_fmt = dtype("<u8")
 
-                record.append(
-                    (
-                        ch.dtype_fmt,
-                        ch.dtype_fmt.itemsize,
-                        offset,
-                        0,
+                    # conversions for channel
+                    conversion = conversion_transfer(signal.conversion, version=4)
+                    if signal.raw:
+                        ch.conversion = conversion
+
+                    # source for channel
+                    source = signal.source
+                    if source:
+                        if source in si_map:
+                            ch.source = si_map[source]
+                        else:
+                            new_source = SourceInformation(
+                                source_type=source.source_type, bus_type=source.bus_type
+                            )
+                            new_source.name = source.name
+                            new_source.path = source.path
+                            new_source.comment = source.comment
+
+                            si_map[source] = new_source
+
+                            ch.source = new_source
+
+                    gp_channels.append(ch)
+
+                    record.append(
+                        (
+                            uint64,
+                            8,
+                            offset,
+                            0,
+                        )
                     )
-                )
 
-                offset += byte_size
+                    offset += byte_size
 
-                fields.append((samples.tobytes(), byte_size))
+                    entry = (dg_cntr, ch_cntr)
+                    self.channels_db.add(name, entry)
+                    for _name in ch.display_names:
+                        self.channels_db.add(_name, entry)
 
-                gp_sdata.append(None)
-                entry = (dg_cntr, ch_cntr)
-                self.channels_db.add(name, entry)
-                for _name in ch.display_names:
-                    self.channels_db.add(_name, entry)
+                    fields.append((offsets.tobytes(), 8))
 
-                ch_cntr += 1
+                    ch_cntr += 1
 
-                # simple channels don't have channel dependencies
-                gp_dep.append(None)
+                    # simple channels don't have channel dependencies
+                    gp_dep.append(None)
+
+                else:
+
+                    byte_size = s_size // 8 or 1
+                    data_block_addr = 0
+
+                    if sig_dtype.kind == "u" and signal.bit_count <= 4:
+                        s_size = signal.bit_count
+
+                    if signal.stream_sync:
+                        channel_type = v4c.CHANNEL_TYPE_SYNC
+                        if signal.attachment:
+                            at_data, at_name, hash_sum = signal.attachment
+                            attachment_index = self.attach(
+                                at_data,
+                                at_name,
+                                hash_sum,
+                                mime="video/avi",
+                                embedded=False,
+                            )
+                            attachment = attachment_index
+                        else:
+                            attachment = None
+
+                        sync_type = v4c.SYNC_TYPE_TIME
+                    else:
+                        channel_type = v4c.CHANNEL_TYPE_VALUE
+                        sync_type = v4c.SYNC_TYPE_NONE
+
+                        if signal.attachment:
+                            at_data, at_name, hash_sum = signal.attachment
+
+                            attachment_index = self.attach(at_data, at_name, hash_sum)
+                            attachment = attachment_index
+                        else:
+                            attachment = None
+
+                    kwargs = {
+                        "channel_type": channel_type,
+                        "sync_type": sync_type,
+                        "bit_count": s_size,
+                        "byte_offset": offset,
+                        "bit_offset": 0,
+                        "data_type": s_type,
+                        "data_block_addr": data_block_addr,
+                        "flags": 0,
+                    }
+
+                    if attachment is not None:
+                        kwargs["attachment_addr"] = 0
+
+                    if invalidation_bytes_nr and signal.invalidation_bits is not None:
+                        inval_bits.append(signal.invalidation_bits)
+                        kwargs["flags"] = v4c.FLAG_CN_INVALIDATION_PRESENT
+                        kwargs["pos_invalidation_bit"] = inval_cntr
+                        inval_cntr += 1
+
+                    ch = Channel(**kwargs)
+                    ch.name = name
+                    ch.unit = signal.unit
+                    ch.comment = signal.comment
+                    ch.display_names = signal.display_names
+                    if len(sig_shape) > 1:
+                        ch.dtype_fmt = dtype((sig_dtype, sig_shape[1:]))
+                    else:
+                        ch.dtype_fmt = sig_dtype
+                    ch.attachment = attachment
+
+                    # conversions for channel
+                    if signal.raw:
+                        ch.conversion = conversion_transfer(
+                            signal.conversion, version=4
+                        )
+
+                    # source for channel
+
+                    source = signal.source
+                    if source:
+                        if source in si_map:
+                            ch.source = si_map[source]
+                        else:
+                            new_source = SourceInformation(
+                                source_type=source.source_type, bus_type=source.bus_type
+                            )
+                            new_source.name = source.name
+                            new_source.path = source.path
+                            new_source.comment = source.comment
+
+                            si_map[source] = new_source
+
+                            ch.source = new_source
+
+                    gp_channels.append(ch)
+
+                    record.append(
+                        (
+                            ch.dtype_fmt,
+                            ch.dtype_fmt.itemsize,
+                            offset,
+                            0,
+                        )
+                    )
+
+                    offset += byte_size
+
+                    fields.append((samples.tobytes(), byte_size))
+
+                    gp_sdata.append(None)
+                    entry = (dg_cntr, ch_cntr)
+                    self.channels_db.add(name, entry)
+                    for _name in ch.display_names:
+                        self.channels_db.add(_name, entry)
+
+                    ch_cntr += 1
+
+                    # simple channels don't have channel dependencies
+                    gp_dep.append(None)
 
             elif sig_type == v4c.SIGNAL_TYPE_CANOPEN:
 
@@ -5993,7 +6126,7 @@ class MDF4(MDF_Common):
 			<original_size>{original_size}</original_size>
 		</extension>
 	</extensions>
-</ATcomment>       
+</ATcomment>
 """
         else:
             hash_sum_encrypted = hash_sum
@@ -7190,6 +7323,7 @@ class MDF4(MDF_Common):
                 vals = channel.conversion.convert(vals)
 
         else:
+
             channel_group = grp.channel_group
 
             record_size = channel_group.samples_byte_nr
@@ -7438,6 +7572,8 @@ class MDF4(MDF_Common):
                     v4c.DATA_TYPE_BYTEARRAY,
                     v4c.DATA_TYPE_UNSIGNED_INTEL,
                     v4c.DATA_TYPE_UNSIGNED_MOTOROLA,
+                    v4c.DATA_TYPE_MIME_SAMPLE,
+                    v4c.DATA_TYPE_MIME_STREAM,
                 ):
                     vals = extract(signal_data, 1, vals - vals[0])
                 else:
@@ -7447,6 +7583,8 @@ class MDF4(MDF_Common):
                     v4c.DATA_TYPE_BYTEARRAY,
                     v4c.DATA_TYPE_UNSIGNED_INTEL,
                     v4c.DATA_TYPE_UNSIGNED_MOTOROLA,
+                    v4c.DATA_TYPE_MIME_SAMPLE,
+                    v4c.DATA_TYPE_MIME_STREAM,
                 ):
 
                     if data_type == v4c.DATA_TYPE_STRING_UTF_16_BE:
@@ -7463,7 +7601,7 @@ class MDF4(MDF_Common):
 
                     else:
                         raise MdfException(
-                            f'wrong data type "{data_type}" for vlsd channel'
+                            f'wrong data type "{data_type}" for vlsd channel "{channel.name}"'
                         )
             else:
                 if len(vals):
@@ -7488,7 +7626,7 @@ class MDF4(MDF_Common):
 
                     else:
                         raise MdfException(
-                            f'wrong data type "{data_type}" for vlsd channel'
+                            f'wrong data type "{data_type}" for vlsd channel "{channel.name}"'
                         )
                 else:
                     vals = array(
@@ -9807,7 +9945,7 @@ class MDF4(MDF_Common):
 
         channel = grp.channels[ch_nr]
 
-        return extract_cncomment_xml(channel.comment)
+        return extract_xml_comment(channel.comment)
 
     def _finalize(self) -> None:
         """
@@ -9988,7 +10126,7 @@ class MDF4(MDF_Common):
             )
         self.identification.file_identification = b"MDF     "
 
-    def _sort(self) -> None:
+    def _sort(self, compress: bool = True) -> None:
         if self._file is None:
             return
 
@@ -10100,34 +10238,63 @@ class MDF4(MDF_Common):
                             new_data = b"".join(new_data)
                             original_size = len(new_data)
                             if original_size:
-                                new_data = lz_compress(new_data)
-                                compressed_size = len(new_data)
 
-                                write(new_data)
+                                if compress:
+                                    new_data = lz_compress(new_data)
+                                    compressed_size = len(new_data)
 
-                                if dg_cntr is not None:
+                                    write(new_data)
 
-                                    info = SignalDataBlockInfo(
-                                        address=tempfile_address,
-                                        compressed_size=compressed_size,
-                                        original_size=original_size,
-                                        block_type=v4c.DZ_BLOCK_LZ,
-                                        location=v4c.LOCATION_TEMPORARY_FILE,
-                                    )
-                                    self.groups[dg_cntr].signal_data[ch_cntr][0].append(
-                                        info
-                                    )
+                                    if dg_cntr is not None:
 
+                                        info = SignalDataBlockInfo(
+                                            address=tempfile_address,
+                                            compressed_size=compressed_size,
+                                            original_size=original_size,
+                                            block_type=v4c.DZ_BLOCK_LZ,
+                                            location=v4c.LOCATION_TEMPORARY_FILE,
+                                        )
+                                        self.groups[dg_cntr].signal_data[ch_cntr][
+                                            0
+                                        ].append(info)
+
+                                    else:
+
+                                        block_info = DataBlockInfo(
+                                            address=tempfile_address,
+                                            block_type=v4c.DZ_BLOCK_LZ,
+                                            compressed_size=compressed_size,
+                                            original_size=original_size,
+                                            param=0,
+                                        )
+                                        final_records[rec_id].append(block_info)
                                 else:
 
-                                    block_info = DataBlockInfo(
-                                        address=tempfile_address,
-                                        block_type=v4c.DZ_BLOCK_LZ,
-                                        compressed_size=compressed_size,
-                                        original_size=original_size,
-                                        param=0,
-                                    )
-                                    final_records[rec_id].append(block_info)
+                                    write(new_data)
+
+                                    if dg_cntr is not None:
+
+                                        info = SignalDataBlockInfo(
+                                            address=tempfile_address,
+                                            compressed_size=original_size,
+                                            original_size=original_size,
+                                            block_type=v4c.DT_BLOCK,
+                                            location=v4c.LOCATION_TEMPORARY_FILE,
+                                        )
+                                        self.groups[dg_cntr].signal_data[ch_cntr][
+                                            0
+                                        ].append(info)
+
+                                    else:
+
+                                        block_info = DataBlockInfo(
+                                            address=tempfile_address,
+                                            block_type=v4c.DT_BLOCK,
+                                            compressed_size=original_size,
+                                            original_size=original_size,
+                                            param=0,
+                                        )
+                                        final_records[rec_id].append(block_info)
 
                 else:  # DTBLOCK
 
@@ -10169,34 +10336,62 @@ class MDF4(MDF_Common):
 
                                 original_size = len(new_data)
                                 if original_size:
-                                    new_data = lz_compress(new_data)
-                                    compressed_size = len(new_data)
+                                    if compress:
+                                        new_data = lz_compress(new_data)
+                                        compressed_size = len(new_data)
 
-                                    write(new_data)
+                                        write(new_data)
 
-                                    if dg_cntr is not None:
+                                        if dg_cntr is not None:
 
-                                        info = SignalDataBlockInfo(
-                                            address=tempfile_address,
-                                            compressed_size=compressed_size,
-                                            original_size=original_size,
-                                            block_type=v4c.DZ_BLOCK_LZ,
-                                            location=v4c.LOCATION_TEMPORARY_FILE,
-                                        )
-                                        self.groups[dg_cntr].signal_data[ch_cntr][
-                                            0
-                                        ].append(info)
+                                            info = SignalDataBlockInfo(
+                                                address=tempfile_address,
+                                                compressed_size=compressed_size,
+                                                original_size=original_size,
+                                                block_type=v4c.DZ_BLOCK_LZ,
+                                                location=v4c.LOCATION_TEMPORARY_FILE,
+                                            )
+                                            self.groups[dg_cntr].signal_data[ch_cntr][
+                                                0
+                                            ].append(info)
 
+                                        else:
+                                            block_info = DataBlockInfo(
+                                                address=tempfile_address,
+                                                block_type=v4c.DZ_BLOCK_LZ,
+                                                compressed_size=compressed_size,
+                                                original_size=original_size,
+                                                param=None,
+                                            )
+
+                                            final_records[rec_id].append(block_info)
                                     else:
-                                        block_info = DataBlockInfo(
-                                            address=tempfile_address,
-                                            block_type=v4c.DZ_BLOCK_LZ,
-                                            compressed_size=compressed_size,
-                                            original_size=original_size,
-                                            param=None,
-                                        )
 
-                                        final_records[rec_id].append(block_info)
+                                        write(new_data)
+
+                                        if dg_cntr is not None:
+
+                                            info = SignalDataBlockInfo(
+                                                address=tempfile_address,
+                                                compressed_size=original_size,
+                                                original_size=original_size,
+                                                block_type=v4c.DT_BLOCK,
+                                                location=v4c.LOCATION_TEMPORARY_FILE,
+                                            )
+                                            self.groups[dg_cntr].signal_data[ch_cntr][
+                                                0
+                                            ].append(info)
+
+                                        else:
+                                            block_info = DataBlockInfo(
+                                                address=tempfile_address,
+                                                block_type=v4c.DT_BLOCK,
+                                                compressed_size=original_size,
+                                                original_size=original_size,
+                                                param=None,
+                                            )
+
+                                            final_records[rec_id].append(block_info)
 
             # after we read all DTBLOCKs in the original file,
             # we assign freshly created blocks from temporary file to
@@ -10721,3 +10916,6 @@ class MDF4(MDF_Common):
 
                             self.extend(index, sigs)
                 self._set_temporary_master(None)
+
+    def reload_header(self):
+        self.header = HeaderBlock(address=0x40, stream=self._file)

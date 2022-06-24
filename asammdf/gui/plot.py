@@ -1,10 +1,17 @@
 # -*- coding: utf-8 -*-
 import logging
+import os
+import sys
 
 from ..blocks.utils import plausible_timestamps
 
 try:
-    from PyQt5 import QtWidgets
+
+    os.environ["QT_API"] = "pyside6"
+    os.environ["PYQTGRAPH_QT_LIB"] = "PySide6"
+    os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "0"
+
+    from PySide6 import QtWidgets
 
     from .widgets.plot_standalone import PlotWindow
 
@@ -49,7 +56,7 @@ def plot(signals, title="", validate=True, index_only=False):
                 signal.samples = signal.samples[idx]
                 signal.timestamps = signal.timestamps[idx]
 
-        main = PlotWindow(signals)
+        main = PlotWindow({sig.name: sig for sig in signals})
         if title.strip():
             main.setWindowTitle(title.strip())
         else:

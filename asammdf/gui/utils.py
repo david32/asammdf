@@ -6,20 +6,22 @@ import json
 from pathlib import Path
 import re
 from threading import Thread
-from time import sleep
+from time import perf_counter, sleep
 import traceback
 from traceback import format_exc
 
 import lxml
 from numexpr import evaluate
 import numpy as np
-from PyQt5 import QtCore, QtGui, QtWidgets
+from pyqtgraph import functions as fn
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..mdf import MDF, MDF2, MDF3, MDF4
 from ..signal import Signal
 from .dialogs.error_dialog import ErrorDialog
 
 ERROR_ICON = None
+RANGE_INDICATOR_ICON = None
 NO_ERROR_ICON = None
 
 
@@ -36,10 +38,93 @@ COLORS = [
     "#17becf",
 ]
 
+SCROLLBAR_STYLE = """
+QTreeWidget {{ font-size: {font_size}pt; }}
+
+QScrollBar:vertical {{
+    border: 1px solid #61b2e2;
+    background: {background};
+    width: 14px;
+    margin: 14px 0px 14px 0px;
+}}
+QScrollBar::handle:vertical {{
+    border: 1px solid  {background};
+    background: #61b2e2;
+    min-height: 40px;
+    width: 6px;
+}}
+
+QScrollBar::add-line:vertical {{
+    border: 1px solid #61b2e2;
+    background: {background};
+    height: 13px;
+    subcontrol-position: bottom;
+    subcontrol-origin: margin;
+}}
+QScrollBar::sub-line:vertical {{
+    border: 1px solid #61b2e2;
+    background: {background};
+    height: 13px;
+    subcontrol-position: top;
+    subcontrol-origin: margin;
+}}
+
+QScrollBar:up-arrow:vertical {{
+    image: url(:up.png);
+    width: 13px;
+    height: 13px;
+}}
+QScrollBar:down-arrow:vertical {{
+    image: url(:down.png);
+    width: 13px;
+    height: 13px;
+}}
+
+
+QScrollBar:horizontal {{
+    border: 1px solid #61b2e2;
+    background: {background};
+    height: 14px;
+    margin: 0px 14px 0px 14px;
+}}
+QScrollBar::handle:horizontal {{
+    border: 1px solid  {background};
+    background: #61b2e2;
+    min-width: 40px;
+    height: 14px;
+}}
+QScrollBar::add-line:horizontal {{
+    border: 1px solid #61b2e2;
+    background: {background};
+    width: 13px;
+    subcontrol-position: right;
+    subcontrol-origin: margin;
+}}
+QScrollBar::sub-line:horizontal {{
+    border: 1px solid #61b2e2;
+    background: {background};
+    width: 13 px;
+    subcontrol-position: left;
+    subcontrol-origin: margin;
+}}
+
+QScrollBar:left-arrow:horizontal {{
+    image: url(:left2.png);
+    width: 13px;
+    height: 13px;
+}}
+QScrollBar:right-arrow:horizontal {{
+    image: url(:right2.png);
+    width: 13px;
+    height: 13px;
+}}"""
+
 COMPARISON_NAME = re.compile(r"(\s*\d+:)?(?P<name>.+)")
 SIG_RE = re.compile(r"\{\{(?!\}\})(?P<name>.*?)\}\}")
 
 TERMINATED = object()
+
+FONT_SIZE = [6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72]
 
 
 def excepthook(exc_type, exc_value, tracebackobj):
@@ -79,20 +164,13 @@ def excepthook(exc_type, exc_value, tracebackobj):
 
 def extract_mime_names(data):
     def fix_comparison_name(data):
-        for i, (
-            name,
-            group_index,
-            channel_index,
-            mdf_uuid,
-            item_type,
-            ranges,
-        ) in enumerate(data):
-            if item_type == "channel":
-                if (group_index, channel_index) != (-1, -1):
-                    name = COMPARISON_NAME.match(name).group("name").strip()
-                    data[i][0] = name
+        for item in data:
+            if item["type"] == "channel":
+                if (item["group_index"], item["channel_index"]) != (-1, -1):
+                    name = COMPARISON_NAME.match(item["name"]).group("name").strip()
+                    item["name"] = name
             else:
-                fix_comparison_name(channel_index)
+                fix_comparison_name(item["channels"])
 
     names = []
     if data.hasFormat("application/octet-stream-asammdf"):
@@ -106,18 +184,13 @@ def extract_mime_names(data):
 
 def load_dsp(file, background="#000000"):
     if isinstance(background, str):
-        background = QtGui.QColor(background)
+        background = fn.mkColor(background)
 
-    def parse_channels(display, unique_names=None):
-        unique_names = unique_names or set()
+    def parse_channels(display):
         channels = []
         for elem in display.iterchildren():
             if elem.tag == "CHANNEL":
                 channel_name = elem.get("name")
-                if channel_name in unique_names:
-                    continue
-                else:
-                    unique_names.add(channel_name)
 
                 color_ = int(elem.get("color"))
                 c = 0
@@ -146,7 +219,7 @@ def load_dsp(file, background="#000000"):
                             c = c << 8
                             c += color_ & 0xFF
                             color_ = color_ >> 8
-                        color = QtGui.QColor(f"#{c:06X}")
+                        color = fn.mkColor(f"#{c:06X}")
                         ranges.append(
                             {
                                 "background_color": background,
@@ -167,6 +240,7 @@ def load_dsp(file, background="#000000"):
                         "fmt": "{}",
                         "individual_axis": False,
                         "name": channel_name,
+                        "mode": "phys",
                         "precision": 3,
                         "ranges": ranges,
                         "unit": "",
@@ -175,7 +249,7 @@ def load_dsp(file, background="#000000"):
                             -gain * offset,
                             -gain * offset + 19 * gain,
                         ],
-                        "mdf_uuid": "000000000000",
+                        "origin_uuid": "000000000000",
                     }
                 )
 
@@ -185,8 +259,10 @@ def load_dsp(file, background="#000000"):
                         "name": elem.get("data"),
                         "enabled": elem.get("on") == "1",
                         "type": "group",
-                        "channels": parse_channels(elem, unique_names),
+                        "channels": parse_channels(elem),
                         "pattern": None,
+                        "origin_uuid": "000000000000",
+                        "ranges": [],
                     }
                 )
 
@@ -219,7 +295,7 @@ def load_dsp(file, background="#000000"):
                                 c = c << 8
                                 c += color_ & 0xFF
                                 color_ = color_ >> 8
-                            color = QtGui.QColor(f"#{c:06X}")
+                            color = fn.mkColor(f"#{c:06X}")
                             ranges.append(
                                 {
                                     "background_color": background,
@@ -241,6 +317,7 @@ def load_dsp(file, background="#000000"):
                             "pattern": info,
                             "type": "group",
                             "ranges": [],
+                            "origin_uuid": "000000000000",
                         }
                     )
 
@@ -289,6 +366,34 @@ def load_dsp(file, background="#000000"):
 
     channels = parse_channels(dsp.find("DISPLAY_INFO"))
 
+    virtual_channels = [
+        {
+            "color": COLORS[i % len(COLORS)],
+            "common_axis": False,
+            "computed": True,
+            "computation": {
+                "type": "expression",
+                "expression": "{{" + ch["parent"] + "}}",
+            },
+            "enabled": True,
+            "fmt": "{}",
+            "individual_axis": False,
+            "name": ch["parent"],
+            "precision": 3,
+            "ranges": [],
+            "unit": "",
+            "conversion": ch["vtab"],
+            "user_defined_name": ch["name"],
+            "origin_uuid": "000000000000",
+            "type": "channel",
+        }
+        for i, ch in enumerate(
+            parse_virtual_channels(dsp.find("VIRTUAL_CHANNEL")).values()
+        )
+    ]
+
+    channels.extend(virtual_channels)
+
     info = {"selected_channels": [], "windows": []}
 
     if channels:
@@ -296,42 +401,10 @@ def load_dsp(file, background="#000000"):
         plot = {
             "type": "Plot",
             "title": "Display channels",
+            "maximized": True,
             "configuration": {
                 "channels": channels,
-            },
-        }
-
-        info["windows"].append(plot)
-
-    channels = parse_virtual_channels(dsp.find("VIRTUAL_CHANNEL"))
-
-    if channels:
-        plot = {
-            "type": "Plot",
-            "title": "Virtual display channels",
-            "configuration": {
-                "channels": [
-                    {
-                        "color": COLORS[i % len(COLORS)],
-                        "common_axis": False,
-                        "computed": True,
-                        "computation": {
-                            "type": "expression",
-                            "expression": "{{" + ch["parent"] + "}}",
-                        },
-                        "enabled": True,
-                        "fmt": "{}",
-                        "individual_axis": False,
-                        "name": ch["parent"],
-                        "precision": 3,
-                        "ranges": [],
-                        "unit": "",
-                        "conversion": ch["vtab"],
-                        "user_defined_name": ch["name"],
-                        "mdf_uuid": "000000000000",
-                    }
-                    for i, ch in enumerate(channels.values())
-                ]
+                "locked": True,
             },
         }
 
@@ -441,119 +514,120 @@ class WorkerThread(Thread):
             self.error = traceback.format_exc()
 
 
+from .dialogs.define_channel import FUNCTIONS, MULTIPLE_ARGS_FUNCTIONS
+
+
 def compute_signal(description, measured_signals, all_timebase):
     type_ = description["type"]
 
-    if type_ == "arithmetic":
-        op = description["op"]
+    try:
 
-        operand1 = description["operand1"]
-        if isinstance(operand1, dict):
-            operand1 = compute_signal(operand1, measured_signals, all_timebase)
-        elif isinstance(operand1, str):
-            operand1 = measured_signals[operand1]
+        if type_ == "arithmetic":
+            op = description["op"]
 
-        operand2 = description["operand2"]
-        if isinstance(operand2, dict):
-            operand2 = compute_signal(operand2, measured_signals, all_timebase)
-        elif isinstance(operand2, str):
-            operand2 = measured_signals[operand2]
+            operand1 = description["operand1"]
+            if isinstance(operand1, dict):
+                operand1 = compute_signal(operand1, measured_signals, all_timebase)
+            elif isinstance(operand1, str):
+                operand1 = measured_signals[operand1]
 
-        result = eval(f"operand1 {op} operand2")
-        if not hasattr(result, "name"):
-            result = Signal(
-                name="_",
-                samples=np.ones(len(all_timebase)) * result,
-                timestamps=all_timebase,
-            )
+            operand2 = description["operand2"]
+            if isinstance(operand2, dict):
+                operand2 = compute_signal(operand2, measured_signals, all_timebase)
+            elif isinstance(operand2, str):
+                operand2 = measured_signals[operand2]
 
-    elif type_ == "function":
-        function = description["name"]
-        args = description["args"]
+            result = eval(f"operand1 {op} operand2")
+            if not hasattr(result, "name"):
+                result = Signal(
+                    name="_",
+                    samples=np.ones(len(all_timebase)) * result,
+                    timestamps=all_timebase,
+                )
 
-        channel = description["channel"]
+        elif type_ == "function":
+            function = description["name"]
+            args = description["args"]
 
-        if isinstance(channel, dict):
-            channel = compute_signal(channel, measured_signals, all_timebase)
-        else:
-            channel = measured_signals[channel]
+            channel = description["channel"]
 
-        func = getattr(np, function)
-
-        if function in [
-            "arccos",
-            "arcsin",
-            "arctan",
-            "cos",
-            "deg2rad",
-            "degrees",
-            "rad2deg",
-            "radians",
-            "sin",
-            "tan",
-            "floor",
-            "rint",
-            "fix",
-            "trunc",
-            "cumprod",
-            "cumsum",
-            "diff",
-            "exp",
-            "log10",
-            "log",
-            "log2",
-            "absolute",
-            "cbrt",
-            "sqrt",
-            "square",
-            "gradient",
-        ]:
-
-            samples = func(channel.samples)
-            if function == "diff":
-                timestamps = channel.timestamps[1:]
+            if isinstance(channel, dict):
+                channel = compute_signal(channel, measured_signals, all_timebase)
             else:
+                channel = measured_signals[channel]
+
+            func = getattr(np, function)
+
+            if function not in MULTIPLE_ARGS_FUNCTIONS:
+
+                samples = func(channel.samples)
+                if function == "diff":
+                    timestamps = channel.timestamps[1:]
+                else:
+                    timestamps = channel.timestamps
+
+            elif function == "round":
+                samples = func(channel.samples, *args)
+                timestamps = channel.timestamps
+            elif function == "clip":
+                samples = func(channel.samples, *args)
                 timestamps = channel.timestamps
 
-        elif function == "around":
-            samples = func(channel.samples, *args)
-            timestamps = channel.timestamps
-        elif function == "clip":
-            samples = func(channel.samples, *args)
-            timestamps = channel.timestamps
+            result = Signal(samples=samples, timestamps=timestamps, name="_")
 
-        result = Signal(samples=samples, timestamps=timestamps, name="_")
+        elif type_ == "expression":
+            expression_string = description["expression"]
+            expression_string = "".join(expression_string.splitlines())
+            names = [
+                match.group("name") for match in SIG_RE.finditer(expression_string)
+            ]
+            positions = [
+                (i, match.start(), match.end())
+                for i, match in enumerate(SIG_RE.finditer(expression_string))
+            ]
+            positions.reverse()
 
-    elif type_ == "expression":
-        expression_string = description["expression"]
-        expression_string = "".join(expression_string.splitlines())
-        names = [match.group("name") for match in SIG_RE.finditer(expression_string)]
-        positions = [
-            (i, match.start(), match.end())
-            for i, match in enumerate(SIG_RE.finditer(expression_string))
-        ]
-        positions.reverse()
+            expression = expression_string
+            for idx, start, end in positions:
+                expression = expression[:start] + f"X_{idx}" + expression[end:]
 
-        expression = expression_string
-        for idx, start, end in positions:
-            expression = expression[:start] + f"X_{idx}" + expression[end:]
+            signals = [measured_signals[name] for name in names]
+            common_timebase = reduce(np.union1d, [sig.timestamps for sig in signals])
+            signals = {
+                f"X_{i}": sig.interp(common_timebase).samples
+                for i, sig in enumerate(signals)
+            }
 
-        signals = [measured_signals[name] for name in names]
-        common_timebase = reduce(np.union1d, [sig.timestamps for sig in signals])
-        signals = {
-            f"X_{i}": sig.interp(common_timebase).samples
-            for i, sig in enumerate(signals)
-        }
+            samples = evaluate(expression, local_dict=signals)
 
-        samples = evaluate(expression, local_dict=signals)
-
+            result = Signal(
+                name="_",
+                samples=samples,
+                timestamps=common_timebase,
+            )
+    except:
         result = Signal(
             name="_",
-            samples=samples,
-            timestamps=common_timebase,
+            samples=[],
+            timestamps=[],
         )
 
     return result
+
+
+def replace_computation_dependency(computation, old_name, new_name):
+    new_computation = {}
+    for key, val in computation:
+        if isinstance(val, str) and old_name in val:
+            new_computation[key] = val.replace(old_name, new_name)
+        elif isinstance(val, dict):
+            new_computation[key] = replace_computation_dependency(
+                val, old_name, new_name
+            )
+        else:
+            new_computation[key] = val
+
+    return new_computation
 
 
 class HelperChannel:
@@ -576,7 +650,7 @@ def copy_ranges(ranges):
                 if isinstance(color, QtGui.QBrush):
                     range_info[color_name] = QtGui.QBrush(color)
                 elif isinstance(color, QtGui.QColor):
-                    range_info[color_name] = QtGui.QColor(color)
+                    range_info[color_name] = fn.mkColor(color)
             new_ranges.append(range_info)
 
         return new_ranges
@@ -594,118 +668,214 @@ def get_colors_using_ranges(
         return new_background_color, new_font_color
 
     if ranges:
-
-        for base_class in (float, int, np.number):
-            if isinstance(value, base_class):
-                for range_info in ranges:
-
-                    (
-                        background_color,
-                        font_color,
-                        op1,
-                        op2,
-                        value1,
-                        value2,
-                    ) = range_info.values()
-
-                    result = False
-
-                    if isinstance(value1, float):
-                        if op1 == "==":
-                            result = value1 == value
-                        elif op1 == "!=":
-                            result = value1 != value
-                        elif op1 == "<=":
-                            result = value1 <= value
-                        elif op1 == "<":
-                            result = value1 < value
-                        elif op1 == ">=":
-                            result = value1 >= value
-                        elif op1 == ">":
-                            result = value1 > value
-
-                        if not result:
-                            continue
-
-                    if isinstance(value2, float):
-                        if op2 == "==":
-                            result = value == value2
-                        elif op2 == "!=":
-                            result = value != value2
-                        elif op2 == "<=":
-                            result = value <= value2
-                        elif op2 == "<":
-                            result = value < value2
-                        elif op2 == ">=":
-                            result = value >= value2
-                        elif op2 == ">":
-                            result = value > value2
-
-                        if not result:
-                            continue
-
-                    if result:
-
-                        new_background_color = background_color
-                        new_font_color = font_color
-                        break
-                break
+        if isinstance(value, (float, int, np.number)):
+            level_class = float
         else:
-            # str here
+            level_class = str
 
-            for range_info in ranges:
+        for range_info in ranges:
 
-                (
-                    background_color,
-                    font_color,
-                    op1,
-                    op2,
-                    value1,
-                    value2,
-                ) = range_info.values()
+            (
+                background_color,
+                font_color,
+                op1,
+                op2,
+                value1,
+                value2,
+            ) = range_info.values()
 
-                result = False
+            result = False
 
-                if isinstance(value1, str):
-                    if op1 == "==":
-                        result = value1 == value
-                    elif op1 == "!=":
-                        result = value1 != value
-                    elif op1 == "<=":
-                        result = value1 <= value
-                    elif op1 == "<":
-                        result = value1 < value
-                    elif op1 == ">=":
-                        result = value1 >= value
-                    elif op1 == ">":
-                        result = value1 > value
+            if isinstance(value1, level_class):
+                if op1 == "==":
+                    result = value1 == value
+                elif op1 == "!=":
+                    result = value1 != value
+                elif op1 == "<=":
+                    result = value1 <= value
+                elif op1 == "<":
+                    result = value1 < value
+                elif op1 == ">=":
+                    result = value1 >= value
+                elif op1 == ">":
+                    result = value1 > value
 
-                    if not result:
-                        continue
+                if not result:
+                    continue
 
-                if isinstance(value2, str):
-                    if op2 == "==":
-                        result = value == value2
-                    elif op2 == "!=":
-                        result = value != value2
-                    elif op2 == "<=":
-                        result = value <= value2
-                    elif op2 == "<":
-                        result = value < value2
-                    elif op2 == ">=":
-                        result = value >= value2
-                    elif op2 == ">":
-                        result = value > value2
+            if isinstance(value2, level_class):
+                if op2 == "==":
+                    result = value == value2
+                elif op2 == "!=":
+                    result = value != value2
+                elif op2 == "<=":
+                    result = value <= value2
+                elif op2 == "<":
+                    result = value < value2
+                elif op2 == ">=":
+                    result = value >= value2
+                elif op2 == ">":
+                    result = value > value2
 
-                    if not result:
-                        continue
+                if not result:
+                    continue
 
-                if result:
-                    new_background_color = background_color
-                    new_font_color = font_color
-                    break
+            if result:
+
+                new_background_color = background_color
+                new_font_color = font_color
+                break
 
     return new_background_color, new_font_color
+
+
+def get_color_using_ranges(
+    value,
+    ranges,
+    default_color,
+    pen=False,
+):
+    new_color = default_color
+
+    if value is None:
+        return new_color
+
+    if ranges:
+        if isinstance(value, (float, int, np.number)):
+            level_class = float
+        else:
+            level_class = str
+
+        for range_info in ranges:
+
+            (
+                background_color,
+                font_color,
+                op1,
+                op2,
+                value1,
+                value2,
+            ) = range_info.values()
+
+            result = False
+
+            if isinstance(value1, level_class):
+                if op1 == "==":
+                    result = value1 == value
+                elif op1 == "!=":
+                    result = value1 != value
+                elif op1 == "<=":
+                    result = value1 <= value
+                elif op1 == "<":
+                    result = value1 < value
+                elif op1 == ">=":
+                    result = value1 >= value
+                elif op1 == ">":
+                    result = value1 > value
+
+                if not result:
+                    continue
+
+            if isinstance(value2, level_class):
+                if op2 == "==":
+                    result = value == value2
+                elif op2 == "!=":
+                    result = value != value2
+                elif op2 == "<=":
+                    result = value <= value2
+                elif op2 == "<":
+                    result = value < value2
+                elif op2 == ">=":
+                    result = value >= value2
+                elif op2 == ">":
+                    result = value > value2
+
+                if not result:
+                    continue
+
+            if result:
+
+                new_color = font_color
+                break
+
+    if pen:
+        return fn.mkPen(new_color.name())
+    else:
+        return new_color
+
+
+def timeit(func):
+    def timed(*args, **kwargs):
+        t1 = perf_counter()
+        ret = func(*args, **kwargs)
+        t2 = perf_counter()
+        delta = t2 - t1
+        if delta >= 1e-3:
+            print(f"CALL {func.__qualname__}: {delta*1e3:.3f} ms")
+        else:
+            print(f"CALL {func.__qualname__}: {delta*1e6:.3f} us")
+        return ret
+
+    return timed
+
+
+def value_as_bin(value, dtype):
+    byte_string = np.array([value], dtype=dtype).tobytes()
+    if dtype.byteorder != ">":
+        byte_string = byte_string[::-1]
+
+    nibles = []
+    for byte in byte_string:
+        nibles.append(f"{byte >> 4:04b}")
+        nibles.append(f"{byte & 0xf:04b}")
+
+    return ".".join(nibles)
+
+
+def value_as_hex(value, dtype):
+    byte_string = np.array([value], dtype=dtype).tobytes()
+    if dtype.byteorder != ">":
+        byte_string = byte_string[::-1]
+
+    return f"0x{byte_string.hex().upper()}"
+
+
+def value_as_str(value, format, dtype=None, precision=3):
+
+    float_fmt = f"{{:.{precision}f}}" if precision >= 0 else "{}"
+    if isinstance(value, (float, np.floating)):
+        kind = "f"
+
+    elif isinstance(value, int):
+        kind = "u"
+        value = np.min_scalar_type(value).type(value)
+        dtype = dtype or value.dtype
+
+    elif isinstance(value, np.integer):
+        kind = "u"
+        dtype = value.dtype
+
+    else:
+        kind = "S"
+
+    if kind in "ui":
+        if format == "bin":
+            string = value_as_bin(value, dtype)
+        elif format == "hex":
+            string = value_as_hex(value, dtype)
+        elif format == "ascii":
+            if 0 < value < 0x110000:
+                string = chr(value)
+            else:
+                string = str(value)
+        else:
+            string = str(value)
+    elif kind in "SUV":
+        string = str(value)
+    else:
+        string = float_fmt.format(value)
+
+    return string
 
 
 if __name__ == "__main__":

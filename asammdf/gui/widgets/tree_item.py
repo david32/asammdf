@@ -3,31 +3,27 @@
 from time import perf_counter
 from traceback import format_exc
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..utils import get_colors_using_ranges
 
 
 class TreeItem(QtWidgets.QTreeWidgetItem):
-
-    __slots__ = "entry", "name", "mdf_uuid", "ranges"
-
     def __init__(
         self,
         entry,
         name="",
         parent=None,
         strings=None,
-        mdf_uuid=None,
+        origin_uuid=None,
         computation=None,
         ranges=None,
     ):
-
         super().__init__(parent, strings)
 
         self.entry = entry
         self.name = name
-        self.mdf_uuid = mdf_uuid
+        self.origin_uuid = origin_uuid
         self.computation = computation or {}
         self.ranges = ranges or []
 
@@ -68,7 +64,7 @@ class TreeItem(QtWidgets.QTreeWidgetItem):
             return super().__lt__(other)
 
     def __del__(self):
-        self.entry = self.name = self.mdf_uuid = None
+        self.entry = self.name = self.origin_uuid = None
 
     def check_signal_range(self, value=None):
         if value is None:

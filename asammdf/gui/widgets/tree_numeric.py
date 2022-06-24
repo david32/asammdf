@@ -2,16 +2,16 @@
 import json
 from struct import pack
 
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from ..dialogs.range_editor import RangeEditor
 from ..utils import extract_mime_names
 
 
 class NumericTreeWidget(QtWidgets.QTreeWidget):
-    add_channels_request = QtCore.pyqtSignal(list)
-    items_rearranged = QtCore.pyqtSignal()
-    items_deleted = QtCore.pyqtSignal(list)
+    add_channels_request = QtCore.Signal(list)
+    items_rearranged = QtCore.Signal()
+    items_deleted = QtCore.Signal(list)
 
     def __init__(self, *args, **kwargs):
 
@@ -38,7 +38,7 @@ class NumericTreeWidget(QtWidgets.QTreeWidget):
             and event.modifiers() == QtCore.Qt.NoModifier
         ):
             selected = reversed(self.selectedItems())
-            names = [(item.mdf_uuid, item.text(0)) for item in selected]
+            names = [(item.origin_uuid, item.text(0)) for item in selected]
             for item in selected:
                 if item.parent() is None:
                     index = self.indexFromItem(item).row()
@@ -77,7 +77,7 @@ class NumericTreeWidget(QtWidgets.QTreeWidget):
                 (
                     info,
                     *item.entry,
-                    str(item.mdf_uuid),
+                    str(item.origin_uuid),
                     "channel",
                     ranges,
                 )

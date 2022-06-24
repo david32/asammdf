@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
-from ..ui import resource_rc as resource_rc
+from ..ui import resource_rc
 from ..widgets.channel_info import ChannelInfoWidget
 
 
@@ -25,6 +25,3 @@ class ChannelInfoDialog(QtWidgets.QDialog):
 
         self.setWindowIcon(icon)
         self.setGeometry(240, 60, 1200, 600)
-
-        screen = QtWidgets.QApplication.desktop().screenGeometry()
-        self.move((screen.width() - 1200) // 2, (screen.height() - 600) // 2)

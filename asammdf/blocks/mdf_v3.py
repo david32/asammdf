@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from copy import deepcopy
+from datetime import datetime
 from io import BufferedReader, BytesIO
 from itertools import product
 import logging
@@ -172,6 +173,11 @@ class MDF3(MDF_Common):
         channels: list[str] | None = None,
         **kwargs,
     ) -> None:
+        if not kwargs.get("__internal__", False):
+            raise MdfException(
+                "Always use the MDF class; do not use the class MDF3 directly"
+            )
+
         self._kwargs = kwargs
         self.original_name = kwargs["original_name"]
         if channels is None:
@@ -500,9 +506,7 @@ class MDF3(MDF_Common):
         if not has_yielded:
             yield b"", 0, _count
 
-    def _prepare_record(
-        self, group: Group
-    ) -> tuple[dict[int, tuple[str, int]], dtype[Any]]:
+    def _prepare_record(self, group: Group) -> list:
         """compute record list
 
         Parameters
@@ -539,15 +543,10 @@ class MDF3(MDF_Common):
 
                 if not new_ch.component_addr:
 
-                    if not new_ch.dtype_fmt:
-                        new_ch.dtype_fmt = dtype(
-                            get_fmt_v3(data_type, bit_count, byte_order)
-                        )
-
                     # adjust size to 1, 2, 4 or 8 bytes
                     size = bit_offset + bit_count
 
-                    byte_size, rem = size // 8, size % 8
+                    byte_size, rem = divmod(size, 8)
                     if rem:
                         byte_size += 1
                     bit_size = byte_size * 8
@@ -562,6 +561,11 @@ class MDF3(MDF_Common):
                             bit_offset += 32 - bit_size
                         elif size > 8:
                             bit_offset += 16 - bit_size
+
+                    if not new_ch.dtype_fmt:
+                        new_ch.dtype_fmt = dtype(
+                            get_fmt_v3(data_type, size, byte_order)
+                        )
 
                     record.append(
                         (
@@ -3105,6 +3109,7 @@ class MDF3(MDF_Common):
 
         if vals.dtype.kind == "S":
             encoding = "latin-1"
+            vals = array([e.rsplit(b"\0")[0] for e in vals.tolist()], dtype=vals.dtype)
 
         if samples_only:
             res = vals, None
@@ -3383,6 +3388,23 @@ class MDF3(MDF_Common):
                 inf[f"channel {j}"] = f'name="{name}" type={ch_type}'
 
         return info
+
+    @property
+    def start_time(self) -> datetime:
+        """getter and setter the measurement start timestamp
+
+        Returns
+        -------
+        timestamp : datetime.datetime
+            start timestamp
+
+        """
+
+        return self.header.start_time
+
+    @start_time.setter
+    def start_time(self, timestamp: datetime) -> None:
+        self.header.start_time = timestamp
 
     def save(
         self,

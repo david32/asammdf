@@ -12,8 +12,10 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ...version import __version__ as libversion
+from ..dialogs.functions_manager import FunctionsManagerDialog
 from ..dialogs.multi_search import MultiSearch
 from ..ui.main_window import Ui_PyMDFMainWindow
+from ..utils import draw_color_icon
 from .batch import BatchWidget
 from .file import FileWidget
 from .mdi_area import MdiAreaWidget, WithMDIArea
@@ -26,6 +28,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         WithMDIArea.__init__(self)
         self.setupUi(self)
         self._settings = QtCore.QSettings()
+        self._settings.setValue("current_theme", self._settings.value("theme", "Light"))
         self._light_palette = self.palette()
 
         self.line_width = 1
@@ -33,6 +36,8 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         self.ignore_value2text_conversions = self._settings.value(
             "ignore_value2text_conversions", False, type=bool
         )
+
+        self.display_cg_name = self._settings.value("display_cg_name", False, type=bool)
 
         self.integer_interpolation = int(
             self._settings.value("integer_interpolation", "2 - hybrid interpolation")[0]
@@ -85,6 +90,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
 
         self.progress = None
 
+        self.files.currentChanged.connect(self.onFileTabChange)
         self.files.tabCloseRequested.connect(self.close_file)
         self.stackedWidget.currentChanged.connect(self.mode_changed)
 
@@ -146,6 +152,20 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         menu.addActions(mode_actions.actions())
         self.menubar.addMenu(menu)
 
+        # managers
+        actions = QtGui.QActionGroup(self)
+
+        action = QtGui.QAction("{: <20}\tF6".format("Functions manager"), menu)
+        action.triggered.connect(self.functions_manager)
+        action.setShortcut("F6")
+        actions.addAction(action)
+
+        menu = QtWidgets.QMenu("Managers", self.menubar)
+        menu.addActions(actions.actions())
+        self.menubar.addMenu(menu)
+
+        # settings
+
         menu = QtWidgets.QMenu("Settings", self.menubar)
         self.menubar.addMenu(menu)
 
@@ -167,11 +187,18 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         subplot_action.setChecked(state)
         menu.addAction(subplot_action)
 
-        # Link sub-windows X-axis
+        # Ignore value2text conversions
         subplot_action = QtGui.QAction("Ignore value2text conversions", menu)
         subplot_action.setCheckable(True)
         subplot_action.toggled.connect(self.set_ignore_value2text_conversions_option)
         subplot_action.setChecked(self.ignore_value2text_conversions)
+        menu.addAction(subplot_action)
+
+        # Show Channel Group Name
+        subplot_action = QtGui.QAction("Display Channel Group Name", menu)
+        subplot_action.setCheckable(True)
+        subplot_action.toggled.connect(self.set_display_cg_name_option)
+        subplot_action.setChecked(self.display_cg_name)
         menu.addAction(subplot_action)
 
         # plot background
@@ -307,6 +334,44 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         submenu.setToolTipsVisible(True)
         menu.addMenu(submenu)
 
+        submenu = QtWidgets.QMenu("Cursor", self.menubar)
+
+        action = QtGui.QAction("Color")
+        action.triggered.connect(partial(self.edit_cursor_options, action=action))
+        color = self._settings.value("cursor_color", "white")
+        icon = draw_color_icon(color)
+        action.setIcon(icon)
+        submenu.addAction(action)
+
+        action = QtWidgets.QWidgetAction(submenu)
+        action.setText("Line width")
+        combo = QtWidgets.QComboBox()
+        combo.addItems([f"{size}pixels width" for size in range(1, 5)])
+        combo.currentIndexChanged.connect(
+            partial(self.edit_cursor_options, action=action)
+        )
+        action.setDefaultWidget(combo)
+
+        submenu.addAction(action)
+
+        action = QtGui.QAction("Show circle")
+        action.setCheckable(True)
+        action.toggled.connect(partial(self.edit_cursor_options, action=action))
+        action.setChecked(self._settings.value("show_cursor_circle", False, type=bool))
+        submenu.addAction(action)
+
+        action = QtGui.QAction("Show horizontal line")
+        action.setCheckable(True)
+        action.toggled.connect(partial(self.edit_cursor_options, action=action))
+        action.setChecked(
+            self._settings.value("show_cursor_horizontal_line", False, type=bool)
+        )
+        submenu.addAction(action)
+
+        menu.addMenu(submenu)
+
+        self.edit_cursor_options()
+
         # plot option menu
         plot_actions = QtGui.QActionGroup(self)
 
@@ -342,10 +407,17 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         plot_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/home.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
-        action = QtGui.QAction(icon, "{: <20}\tH".format("Home"), menu)
+        icon.addPixmap(QtGui.QPixmap(":/axis.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        action = QtGui.QAction(icon, "{: <20}\tH".format("Honeywell"), menu)
         action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key_H))
         action.setShortcut(QtCore.Qt.Key_H)
+        plot_actions.addAction(action)
+
+        icon = QtGui.QIcon()
+        icon.addPixmap(QtGui.QPixmap(":/home.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        action = QtGui.QAction(icon, "{: <20}\tW".format("Home"), menu)
+        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key_W))
+        action.setShortcut(QtCore.Qt.Key_W)
         plot_actions.addAction(action)
 
         icon = QtGui.QIcon()
@@ -402,7 +474,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         icon.addPixmap(
             QtGui.QPixmap(":/focus.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
         )
-        action = QtGui.QAction(icon, "{: <20}\t2".format("Focused mdoe"), menu)
+        action = QtGui.QAction(icon, "{: <20}\t2".format("Focused mode"), menu)
         action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key_2))
         action.setShortcut(QtCore.Qt.Key_2)
         plot_actions.addAction(action)
@@ -465,9 +537,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
                 modifier=QtCore.Qt.ShiftModifier,
             )
         )
-        action.setShortcut(
-            QtGui.QKeySequence(QtCore.Qt.Key_Left, QtCore.Qt.ShiftModifier)
-        )
+        action.setShortcut(QtGui.QKeySequence("Shift+Left"))
         channel_shift_actions.addAction(action)
 
         icon = QtGui.QIcon()
@@ -484,9 +554,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
                 modifier=QtCore.Qt.ShiftModifier,
             )
         )
-        action.setShortcut(
-            QtGui.QKeySequence(QtCore.Qt.Key_Right, QtCore.Qt.ShiftModifier)
-        )
+        action.setShortcut(QtGui.QKeySequence("Shift+Right"))
         channel_shift_actions.addAction(action)
 
         icon = QtGui.QIcon()
@@ -503,9 +571,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
                 modifier=QtCore.Qt.ShiftModifier,
             )
         )
-        action.setShortcut(
-            QtGui.QKeySequence(QtCore.Qt.Key_Up, QtCore.Qt.ShiftModifier)
-        )
+        action.setShortcut(QtGui.QKeySequence("Shift+Up"))
         channel_shift_actions.addAction(action)
 
         icon = QtGui.QIcon()
@@ -522,9 +588,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
                 modifier=QtCore.Qt.ShiftModifier,
             )
         )
-        action.setShortcut(
-            QtGui.QKeySequence(QtCore.Qt.Key_Down, QtCore.Qt.ShiftModifier)
-        )
+        action.setShortcut(QtGui.QKeySequence("Shift+Down"))
         channel_shift_actions.addAction(action)
 
         # values display
@@ -689,11 +753,9 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
 
         icon = QtGui.QIcon()
         icon.addPixmap(
-            QtGui.QPixmap(":/comments.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
+            QtGui.QPixmap(":/bookmark.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
         )
-        action = QtGui.QAction(
-            icon, "{: <20}\tCtrl+I".format("Insert cursor comment"), menu
-        )
+        action = QtGui.QAction(icon, "{: <20}\tCtrl+I".format("Insert bookmark"), menu)
         action.triggered.connect(
             partial(
                 self.plot_action,
@@ -705,7 +767,10 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         cursors_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        action = QtGui.QAction("{: <20}\tAlt+I".format("Toggle trigger texts"), menu)
+        icon.addPixmap(
+            QtGui.QPixmap(":/bookmark.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
+        )
+        action = QtGui.QAction(icon, "{: <20}\tAlt+I".format("Toggle bookmarks"), menu)
         action.triggered.connect(
             partial(
                 self.plot_action, key=QtCore.Qt.Key_I, modifier=QtCore.Qt.AltModifier
@@ -758,6 +823,11 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
 
         self.show()
         self.fullscreen = None
+
+    def onFileTabChange(self, idx):
+        fileWidget = self.files.widget(idx)
+        if fileWidget:
+            fileWidget.update_all_channel_trees()
 
     def sizeHint(self):
         return QtCore.QSize(1, 1)
@@ -835,6 +905,46 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
                     widget.mdi_area.tile_vertically()
                 elif mode == "tile horizontally":
                     widget.mdi_area.tile_horizontally()
+
+    def edit_cursor_options(self, checked=None, action=None):
+        if action:
+            if action.text() == "Color":
+
+                color = self._settings.value("cursor_color", "white")
+                color = QtWidgets.QColorDialog.getColor(color)
+                if not color.isValid():
+                    return
+
+                self._settings.setValue("cursor_color", color.name())
+
+                icon = draw_color_icon(color)
+                action.setIcon(icon)
+
+            elif action.text() == "Show circle":
+                self._settings.setValue("show_cursor_circle", action.isChecked())
+
+            elif action.text() == "Show horizontal line":
+                self._settings.setValue(
+                    "show_cursor_horizontal_line", action.isChecked()
+                )
+
+            elif action.text() == "Line width":
+                self._settings.setValue(
+                    "cursor_line_width", action.defaultWidget().currentIndex() + 1
+                )
+
+        cursor_circle = self._settings.value("show_cursor_circle", False, type=bool)
+        cursor_horizontal_line = self._settings.value(
+            "show_cursor_horizontal_line", False, type=bool
+        )
+        cursor_line_width = self._settings.value("cursor_line_width", 1, type=int)
+        cursor_color = self._settings.value("cursor_color", "#e69138")
+
+        for i in range(self.files.count()):
+            file = self.files.widget(i)
+            file.set_cursor_options(
+                cursor_circle, cursor_horizontal_line, cursor_line_width, cursor_color
+            )
 
     def set_subplot_option(self, state):
         if isinstance(state, str):
@@ -1095,6 +1205,20 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
             self.files.widget(i).ignore_value2text_conversions = state
         self.batch.ignore_value2text_conversions = state
 
+    def set_display_cg_name_option(self, state):
+        if isinstance(state, str):
+            state = True if state == "true" else False
+        self.display_cg_name = state
+        self._settings.setValue("display_cg_name", state)
+        count = self.files.count()
+
+        for i in range(count):
+            self.files.widget(i).display_cg_name = state
+            if self.files.widget(i).isVisible():
+                self.files.widget(i).update_all_channel_trees()
+
+        self.batch.display_cg_name = state
+
     def update_progress(self, current_index, max_index):
         self.progress = current_index, max_index
 
@@ -1137,12 +1261,14 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
                 self.subplots,
                 self.subplots_link,
                 self.ignore_value2text_conversions,
+                self.display_cg_name,
                 self.line_interconnect,
                 1,
                 None,
                 None,
                 self,
             )
+
         except:
             raise
         else:
@@ -1152,6 +1278,8 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
             self.files.setCurrentIndex(index)
             widget.open_new_file.connect(self._open_file)
             widget.full_screen_toggled.connect(self.toggle_fullscreen)
+
+            self.edit_cursor_options()
 
     def open_file(self, event):
         system = platform.system().lower()
@@ -1439,3 +1567,25 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
             widget = self.files.currentWidget()
             if widget:
                 widget.save_channel_list()
+
+    def functions_manager(self):
+        if self.stackedWidget.currentIndex() == 0:
+            file = self.files.currentWidget()
+            if file:
+                channels = {}
+                mdf = file.mdf
+                for name, entries in mdf.channels_db.items():
+                    gp_index, ch_index = entries[0]
+                    comment = mdf.groups[gp_index].channels[ch_index].comment
+
+                    channels[name] = comment
+
+                dlg = FunctionsManagerDialog(file.functions, channels, parent=self)
+                dlg.setModal(True)
+                dlg.exec_()
+
+                if dlg.pressed_button == "apply":
+                    original_definitions = dlg.original_definitions
+                    modified_definitions = dlg.modified_definitions
+
+                    file.update_functions(original_definitions, modified_definitions)

@@ -46,7 +46,7 @@ except:
             return {"encoding": encoding}
 
 
-from canmatrix.canmatrix import CanMatrix
+from canmatrix.canmatrix import CanMatrix, matrix_class
 import canmatrix.formats
 import numpy as np
 from numpy import arange, bool_, dtype, interp, where
@@ -344,6 +344,7 @@ def sanitize_xml(text: str) -> str:
 
 
 def extract_display_names(comment: str) -> dict[str, str]:
+    comment = comment.replace(' xmlns="http://www.asam.net/mdf/v4"', "")
     display_names = {}
     if comment.startswith("<CN") and "<names>" in comment:
 
@@ -364,6 +365,7 @@ def extract_display_names(comment: str) -> dict[str, str]:
 
 def extract_encryption_information(comment: str) -> dict[str, str]:
     info = {}
+    comment = comment.replace(' xmlns="http://www.asam.net/mdf/v4"', "")
     if comment.startswith("<ATcomment") and "<encrypted>" in comment:
 
         try:
@@ -383,6 +385,22 @@ def extract_encryption_information(comment: str) -> dict[str, str]:
             pass
 
     return info
+
+
+def extract_ev_tool(comment: str) -> str:
+    tool = ""
+    comment = comment.replace(' xmlns="http://www.asam.net/mdf/v4"', "")
+    try:
+        comment = ET.fromstring(comment)
+        match = comment.find(".//tool")
+        if match is None:
+            tool = ""
+        else:
+            tool = match.text or ""
+    except:
+        pass
+
+    return tool
 
 
 @lru_cache(maxsize=1024)
@@ -817,14 +835,13 @@ def debug_channel(
     print("write fragment size:", mdf._write_fragment_size, file=file)
     print()
 
-    parents, dtypes = mdf._prepare_record(group)
+    record = mdf._prepare_record(group)
     print("GROUP", "=" * 74, file=file)
     print("sorted:", group["sorted"], file=file)
     print("data location:", group["data_location"], file=file)
     print("data blocks:", group.data_blocks, file=file)
     print("dependencies", group["channel_dependencies"], file=file)
-    print("parents:", parents, file=file)
-    print("dtypes:", dtypes, file=file)
+    print("record:", record, file=file)
     print(file=file)
 
     cg = group["channel_group"]
@@ -1750,6 +1767,33 @@ def pandas_query_compatible(name: str) -> str:
 def load_can_database(
     path: StrPathType, contents: bytes | str | None = None, **kwargs
 ) -> CanMatrix | None:
+    """
+
+
+    Parameters
+    ----------
+    path : StrPathType
+        database path
+    contents: bytes | str | None = None
+        optional database content
+    kwargs : dict
+
+        fd : bool = False
+            if supplied, only buses with the same FD kind will be loaded
+
+        load_flat : bool = False
+            if supplied all the CAN messages found in multiple buses will be contained
+            in the CAN database object. By default the first bus will be returned
+
+        cluster_name : str
+            if supplied load just the clusters with this name
+
+    Returns
+    -------
+    db : canmatrix.CanMatrix | None
+        CAN database object or None
+
+    """
     path = Path(path)
     import_type = path.suffix.lstrip(".").lower()
     if contents is None:
@@ -1779,8 +1823,26 @@ def load_can_database(
             dbs = None
 
     if dbs:
-        first_bus = list(dbs)[0]
-        can_matrix = dbs[first_bus]
+        # filter only CAN clusters
+        dbs = {name: db for name, db in dbs.items() if db.type == matrix_class.CAN}
+
+    if dbs:
+
+        cluster_name = kwargs.get("cluster_name", None)
+        if cluster_name is not None:
+            dbs = {name: db for name, db in dbs.items() if name == cluster_name}
+
+        if "fd" in kwargs:
+            fd = kwargs["fd"]
+            dbs = {name: db for name, db in dbs.items() if db.contains_fd == fd}
+
+        if kwargs.get("load_flat", False):
+            can_matrix, *rest = list(dbs.values())
+            can_matrix.merge(rest)
+
+        else:
+            first_bus = list(dbs)[0]
+            can_matrix = dbs[first_bus]
     else:
         can_matrix = None
 
@@ -1853,14 +1915,9 @@ def plausible_timestamps(
     """
 
     exps = np.log10(t)
-    idx = (
-        (~np.isnan(t))
-        & (~np.isinf(t))
-        & (t >= minimum)
-        & (t <= maximum)
-        & (exps >= exp_min)
-        & (exps <= exp_max)
-    )
+    idx = (~np.isnan(t)) & (~np.isinf(t)) & (t >= minimum) & (t <= maximum) & (
+        t == 0
+    ) | ((exps >= exp_min) & (exps <= exp_max))
     if not np.all(idx):
         all_ok = False
         return all_ok, idx

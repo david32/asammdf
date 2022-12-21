@@ -27,6 +27,7 @@
 #
 #
 
+import bisect
 import datetime
 import logging
 import threading
@@ -47,6 +48,7 @@ from ..ui.tabular import Ui_TabularDisplay
 from ..utils import (
     copy_ranges,
     extract_mime_names,
+    FONT_SIZE,
     get_colors_using_ranges,
     run_thread_with_progress,
     value_as_str,
@@ -407,7 +409,9 @@ class DataTableView(QtWidgets.QTableView):
         self.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
         self.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
 
-        self.setFont(QtGui.QFont(MONOSPACE_FONT))
+        font = QtGui.QFont()
+        font.fromString(MONOSPACE_FONT)
+        self.setFont(font)
 
         self.setAcceptDrops(False)
         self.setDragDropMode(self.NoDragDrop)
@@ -625,6 +629,7 @@ class HeaderView(QtWidgets.QTableView):
         self.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
         self.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
         font = QtGui.QFont()
+        font.fromString(MONOSPACE_FONT)
         font.setBold(True)
         self.setFont(font)
 
@@ -644,9 +649,6 @@ class HeaderView(QtWidgets.QTableView):
             self.horizontalHeader().setSectionResizeMode(
                 QtWidgets.QHeaderView.ResizeMode.Stretch
             )
-            font = QtGui.QFont(MONOSPACE_FONT)
-            font.setBold(True)
-            self.setFont(font)
 
         # Set initial size
         self.resize(self.sizeHint())
@@ -1105,6 +1107,7 @@ class HeaderNamesView(QtWidgets.QTableView):
             )
 
         font = QtGui.QFont()
+        font.fromString(MONOSPACE_FONT)
         font.setBold(True)
         self.setFont(font)
         self.init_size()
@@ -1680,6 +1683,7 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
                 self.tree.columnHeader.horizontalHeader().sectionSize(i)
                 for i in range(self.tree.columnHeader.horizontalHeader().count())
             ],
+            "font_size": self.tree.dataView.font().pointSize(),
         }
 
         return config
@@ -1797,11 +1801,11 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
     def keyPressEvent(self, event):
 
         key = event.key()
-        modifier = event.modifiers()
+        modifiers = event.modifiers()
 
         if (
             key in (QtCore.Qt.Key_H, QtCore.Qt.Key_B, QtCore.Qt.Key_P)
-            and modifier == QtCore.Qt.ControlModifier
+            and modifiers == QtCore.Qt.ControlModifier
         ):
             if key == QtCore.Qt.Key_H:
                 self.format_selection.setCurrentText("hex")
@@ -1812,7 +1816,7 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
 
             event.accept()
 
-        elif key == QtCore.Qt.Key_S and modifier == QtCore.Qt.ControlModifier:
+        elif key == QtCore.Qt.Key_S and modifiers == QtCore.Qt.ControlModifier:
             file_name, _ = QtWidgets.QFileDialog.getSaveFileName(
                 self,
                 "Select output measurement file",
@@ -1824,6 +1828,16 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
                 with MDF() as mdf:
                     mdf.append(self.tree.pgdf.df_unfiltered)
                     mdf.save(file_name, overwrite=True)
+
+        elif (
+            key == QtCore.Qt.Key_BracketLeft and modifiers == QtCore.Qt.ControlModifier
+        ):
+            self.decrease_font()
+
+        elif (
+            key == QtCore.Qt.Key_BracketRight and modifiers == QtCore.Qt.ControlModifier
+        ):
+            self.increase_font()
 
         else:
             self.tree.dataView.keyPressEvent(event)
@@ -1876,6 +1890,41 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
                 ranges = dlg.result
                 self.ranges[original_name] = ranges
 
+    def decrease_font(self):
+        font = self.tree.dataView.font()
+        size = font.pointSize()
+        pos = bisect.bisect_left(FONT_SIZE, size) - 1
+        if pos < 0:
+            pos = 0
+        new_size = FONT_SIZE[pos]
+
+        self.set_font_size(new_size)
+
+    def increase_font(self):
+        font = self.tree.dataView.font()
+        size = font.pointSize()
+        pos = bisect.bisect_right(FONT_SIZE, size)
+        if pos == len(FONT_SIZE):
+            pos -= 1
+        new_size = FONT_SIZE[pos]
+
+        self.set_font_size(new_size)
+
+    def set_font_size(self, size):
+        self.hide()
+        font = self.tree.dataView.font()
+        font.setPointSize(size)
+        self.tree.dataView.setFont(font)
+        font.setBold(True)
+        self.tree.indexHeader.setFont(font)
+        self.tree.indexHeaderNames.setFont(font)
+        self.tree.columnHeader.setFont(font)
+        self.tree.columnHeaderNames.setFont(font)
+        self.show()
+
+        self.tree.default_row_height = 12 + size
+        self.tree.set_styles()
+
 
 class DataFrameViewer(QtWidgets.QWidget):
     def __init__(self, pgdf):
@@ -1897,7 +1946,9 @@ class DataFrameViewer(QtWidgets.QWidget):
                 "Courier",
             ):
                 if family in families:
-                    MONOSPACE_FONT = family
+                    MONOSPACE_FONT = (
+                        f"{family},9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,Regular"
+                    )
                     break
 
         pgdf.dataframe_viewer = self
@@ -1994,35 +2045,13 @@ class DataFrameViewer(QtWidgets.QWidget):
         #                                               QtWidgets.QSizePolicy.Expanding,
         #                                               QtWidgets.QSizePolicy.Expanding), 0, 0, 1, 1, )
 
+        self.default_row_height = 24
         self.set_styles()
         self.indexHeader.setSizePolicy(
             QtWidgets.QSizePolicy.MinimumExpanding, QtWidgets.QSizePolicy.Maximum
         )
         self.columnHeader.setSizePolicy(
             QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.MinimumExpanding
-        )
-
-        # Default row height
-        default_row_height = 24
-        self.indexHeaderNames.verticalHeader().setDefaultSectionSize(default_row_height)
-        self.indexHeaderNames.verticalHeader().setMinimumSectionSize(default_row_height)
-        self.indexHeaderNames.verticalHeader().setMaximumSectionSize(default_row_height)
-        self.indexHeaderNames.verticalHeader().sectionResizeMode(
-            QtWidgets.QHeaderView.Fixed
-        )
-        self.indexHeader.verticalHeader().setDefaultSectionSize(default_row_height)
-        self.indexHeader.verticalHeader().setMinimumSectionSize(default_row_height)
-        self.indexHeader.verticalHeader().setMaximumSectionSize(default_row_height)
-        self.indexHeader.verticalHeader().sectionResizeMode(QtWidgets.QHeaderView.Fixed)
-        self.dataView.verticalHeader().setDefaultSectionSize(default_row_height)
-        self.dataView.verticalHeader().setMinimumSectionSize(default_row_height)
-        self.dataView.verticalHeader().setMaximumSectionSize(default_row_height)
-        self.dataView.verticalHeader().sectionResizeMode(QtWidgets.QHeaderView.Fixed)
-        self.columnHeader.verticalHeader().setDefaultSectionSize(default_row_height)
-        self.columnHeader.verticalHeader().setMinimumSectionSize(default_row_height)
-        self.columnHeader.verticalHeader().setMaximumSectionSize(default_row_height)
-        self.columnHeader.verticalHeader().sectionResizeMode(
-            QtWidgets.QHeaderView.Fixed
         )
 
         # Set column widths
@@ -2053,6 +2082,39 @@ class DataFrameViewer(QtWidgets.QWidget):
         ]:
             item.setContentsMargins(0, 0, 0, 0)
             # item.setItemDelegate(NoFocusDelegate())
+
+        self.indexHeaderNames.verticalHeader().setDefaultSectionSize(
+            self.default_row_height
+        )
+        self.indexHeaderNames.verticalHeader().setMinimumSectionSize(
+            self.default_row_height
+        )
+        self.indexHeaderNames.verticalHeader().setMaximumSectionSize(
+            self.default_row_height
+        )
+        self.indexHeaderNames.verticalHeader().sectionResizeMode(
+            QtWidgets.QHeaderView.Fixed
+        )
+        self.indexHeader.verticalHeader().setDefaultSectionSize(self.default_row_height)
+        self.indexHeader.verticalHeader().setMinimumSectionSize(self.default_row_height)
+        self.indexHeader.verticalHeader().setMaximumSectionSize(self.default_row_height)
+        self.indexHeader.verticalHeader().sectionResizeMode(QtWidgets.QHeaderView.Fixed)
+        self.dataView.verticalHeader().setDefaultSectionSize(self.default_row_height)
+        self.dataView.verticalHeader().setMinimumSectionSize(self.default_row_height)
+        self.dataView.verticalHeader().setMaximumSectionSize(self.default_row_height)
+        self.dataView.verticalHeader().sectionResizeMode(QtWidgets.QHeaderView.Fixed)
+        self.columnHeader.verticalHeader().setDefaultSectionSize(
+            self.default_row_height
+        )
+        self.columnHeader.verticalHeader().setMinimumSectionSize(
+            self.default_row_height
+        )
+        self.columnHeader.verticalHeader().setMaximumSectionSize(
+            self.default_row_height
+        )
+        self.columnHeader.verticalHeader().sectionResizeMode(
+            QtWidgets.QHeaderView.Fixed
+        )
 
     def __reduce__(self):
         # This is so dataclasses.asdict doesn't complain about this being unpicklable

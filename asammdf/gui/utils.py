@@ -1,21 +1,29 @@
 # -*- coding: utf-8 -*-
+from collections import defaultdict
 from datetime import datetime
 from functools import reduce
+import inspect
 from io import StringIO
 import json
+import math
+import os
 from pathlib import Path
 import re
+from textwrap import dedent, indent
 from threading import Thread
 from time import perf_counter, sleep
 import traceback
 from traceback import format_exc
 
 import lxml
+import natsort
 from numexpr import evaluate
 import numpy as np
+import pandas as pd
 from pyqtgraph import functions as fn
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from ..blocks.options import FloatInterpolation, IntegerInterpolation
 from ..mdf import MDF, MDF2, MDF3, MDF4
 from ..signal import Signal
 from .dialogs.error_dialog import ErrorDialog
@@ -125,6 +133,10 @@ SIG_RE = re.compile(r"\{\{(?!\}\})(?P<name>.*?)\}\}")
 TERMINATED = object()
 
 FONT_SIZE = [6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72]
+VARIABLE = re.compile(r"(?P<var>\{\{[^}]+\}\})")
+VARIABLE_GET_DATA = re.compile(r"get_data\s*\(\s*\"(?P<var>[^\"]+)")
+C_FUNCTION = re.compile(r"\s+(?P<function>\S+)\s*\(\s*struct\s+DATA\s+\*data\s*\)")
+FUNC_NAME = re.compile(r"def\s+(?P<name>\S+)\s*\(")
 
 
 def excepthook(exc_type, exc_value, tracebackobj):
@@ -182,7 +194,7 @@ def extract_mime_names(data):
     return names
 
 
-def load_dsp(file, background="#000000"):
+def load_dsp(file, background="#000000", flat=False):
     if isinstance(background, str):
         background = fn.mkColor(background)
 
@@ -191,6 +203,12 @@ def load_dsp(file, background="#000000"):
         for elem in display.iterchildren():
             if elem.tag == "CHANNEL":
                 channel_name = elem.get("name")
+
+                comment = elem.find("COMMENT")
+                if comment is not None:
+                    comment = elem.get("text")
+                else:
+                    comment = ""
 
                 color_ = int(elem.get("color"))
                 c = 0
@@ -236,6 +254,8 @@ def load_dsp(file, background="#000000"):
                         "color": f"#{c:06X}",
                         "common_axis": False,
                         "computed": False,
+                        "flags": 0,
+                        "comment": comment,
                         "enabled": elem.get("on") == "1",
                         "fmt": "{}",
                         "individual_axis": False,
@@ -351,7 +371,10 @@ def load_dsp(file, background="#000000"):
                 conv = {}
                 for i, item in enumerate(vtab.findall("tab")):
                     conv[f"val_{i}"] = float(item.get("min"))
-                    conv[f"text_{i}"] = item.get("text")
+                    text = item.get("text")
+                    if isinstance(text, bytes):
+                        text = text.decode("utf-8", errors="replace")
+                    conv[f"text_{i}"] = text
 
                 virtual_channel["vtab"] = conv
 
@@ -361,42 +384,93 @@ def load_dsp(file, background="#000000"):
 
         return channels
 
+    def parse_c_functions(display):
+        c_functions = set()
+
+        if display is None:
+            return c_functions
+
+        for item in display.findall("CALC_FUNC"):
+            string = item.text
+
+            for match in C_FUNCTION.finditer(string):
+                c_functions.add(match.group("function"))
+
+        return natsort.natsorted(c_functions)
+
     dsp = Path(file).read_bytes().replace(b"\0", b"")
     dsp = lxml.etree.fromstring(dsp)
 
     channels = parse_channels(dsp.find("DISPLAY_INFO"))
+    c_functions = parse_c_functions(dsp)
 
-    virtual_channels = [
-        {
-            "color": COLORS[i % len(COLORS)],
-            "common_axis": False,
-            "computed": True,
-            "computation": {
-                "type": "expression",
-                "expression": "{{" + ch["parent"] + "}}",
-            },
-            "enabled": True,
-            "fmt": "{}",
-            "individual_axis": False,
-            "name": ch["parent"],
-            "precision": 3,
-            "ranges": [],
-            "unit": "",
-            "conversion": ch["vtab"],
-            "user_defined_name": ch["name"],
-            "origin_uuid": "000000000000",
-            "type": "channel",
-        }
-        for i, ch in enumerate(
-            parse_virtual_channels(dsp.find("VIRTUAL_CHANNEL")).values()
+    functions = {}
+    virtual_channels = []
+
+    for i, ch in enumerate(
+        parse_virtual_channels(dsp.find("VIRTUAL_CHANNEL")).values()
+    ):
+        virtual_channels.append(
+            {
+                "color": COLORS[i % len(COLORS)],
+                "common_axis": False,
+                "computed": True,
+                "computation": {
+                    "args": {"arg1": []},
+                    "type": "python_function",
+                    "channel_comment": ch["comment"],
+                    "channel_name": ch["name"],
+                    "channel_unit": "",
+                    "function": f"f_{ch['name']}",
+                    "triggering": "triggering_on_all",
+                    "triggering_value": "all",
+                },
+                "flags": int(
+                    Signal.Flags.computed | Signal.Flags.user_defined_conversion
+                ),
+                "enabled": True,
+                "fmt": "{}",
+                "individual_axis": False,
+                "name": ch["parent"],
+                "precision": 3,
+                "ranges": [],
+                "unit": "",
+                "conversion": ch["vtab"],
+                "user_defined_name": ch["name"],
+                "comment": f"Datalyser virtual channel: {ch['comment']}",
+                "origin_uuid": "000000000000",
+                "type": "channel",
+            }
         )
-    ]
 
-    channels.extend(virtual_channels)
+        functions[
+            f"f_{ch['name']}"
+        ] = f"def f_{ch['name']}(arg1=0, t=0):\n    return arg1"
 
-    info = {"selected_channels": [], "windows": []}
+    if virtual_channels:
+        channels.append(
+            {
+                "name": "Datalyser Virtual Channels",
+                "enabled": False,
+                "type": "group",
+                "channels": virtual_channels,
+                "pattern": None,
+                "origin_uuid": "000000000000",
+                "ranges": [],
+            }
+        )
 
-    if channels:
+    info = {
+        "selected_channels": [],
+        "windows": [],
+        "has_virtual_channels": bool(virtual_channels),
+        "c_functions": c_functions,
+        "functions": functions,
+    }
+
+    if flat:
+        info = flatten_dsp(channels)
+    else:
 
         plot = {
             "type": "Plot",
@@ -411,6 +485,18 @@ def load_dsp(file, background="#000000"):
         info["windows"].append(plot)
 
     return info
+
+
+def flatten_dsp(channels):
+    res = []
+
+    for item in channels:
+        if item["type"] == "group":
+            res.extend(flatten_dsp(item["channels"]))
+        else:
+            res.append(item["name"])
+
+    return res
 
 
 def load_lab(file):
@@ -483,8 +569,22 @@ def run_thread_with_progress(
         return thr.output
 
 
+class ProgressDialog(QtWidgets.QProgressDialog):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def keyPressEvent(self, event):
+        if (
+            event.key() == QtCore.Qt.Key_Escape
+            and event.modifiers() == QtCore.Qt.NoModifier
+        ):
+            self.close()
+        else:
+            super().keyPressEvent(event)
+
+
 def setup_progress(parent, title, message, icon_name):
-    progress = QtWidgets.QProgressDialog(message, "", 0, 100, parent)
+    progress = ProgressDialog(message, "Cancel", 0, 100, parent)
 
     progress.setWindowModality(QtCore.Qt.ApplicationModal)
     progress.setCancelButton(None)
@@ -514,105 +614,336 @@ class WorkerThread(Thread):
             self.error = traceback.format_exc()
 
 
-from .dialogs.define_channel import FUNCTIONS, MULTIPLE_ARGS_FUNCTIONS
+def get_data_function(signals, fill_0_for_missing_computation_channels):
+    def get_data(name, t=0, interpolated=False):
+        if name in signals:
+            samples = (
+                signals[name]
+                .interp(
+                    [t],
+                    integer_interpolation_mode=IntegerInterpolation.REPEAT_PREVIOUS_SAMPLE
+                    if not interpolated
+                    else IntegerInterpolation.LINEAR_INTERPOLATION,
+                    float_interpolation_mode=FloatInterpolation.REPEAT_PREVIOUS_SAMPLE
+                    if not interpolated
+                    else FloatInterpolation.LINEAR_INTERPOLATION,
+                )
+                .samples
+            )
+            if len(samples):
+                return samples[0]
+            else:
+                return 0
+
+        elif fill_0_for_missing_computation_channels:
+            return 0
+
+        else:
+            raise Exception(f"{name} channel was not found")
+
+    return get_data
 
 
-def compute_signal(description, measured_signals, all_timebase):
+def compute_signal(
+    description,
+    measured_signals,
+    all_timebase,
+    functions,
+):
     type_ = description["type"]
 
     try:
+        if type_ == "python_function":
 
-        if type_ == "arithmetic":
-            op = description["op"]
+            func, trace = (
+                None,
+                f"{description['function']} not found in the user defined functions",
+            )
 
-            operand1 = description["operand1"]
-            if isinstance(operand1, dict):
-                operand1 = compute_signal(operand1, measured_signals, all_timebase)
-            elif isinstance(operand1, str):
-                operand1 = measured_signals[operand1]
-
-            operand2 = description["operand2"]
-            if isinstance(operand2, dict):
-                operand2 = compute_signal(operand2, measured_signals, all_timebase)
-            elif isinstance(operand2, str):
-                operand2 = measured_signals[operand2]
-
-            result = eval(f"operand1 {op} operand2")
-            if not hasattr(result, "name"):
-                result = Signal(
-                    name="_",
-                    samples=np.ones(len(all_timebase)) * result,
-                    timestamps=all_timebase,
-                )
-
-        elif type_ == "function":
-            function = description["name"]
-            args = description["args"]
-
-            channel = description["channel"]
-
-            if isinstance(channel, dict):
-                channel = compute_signal(channel, measured_signals, all_timebase)
-            else:
-                channel = measured_signals[channel]
-
-            func = getattr(np, function)
-
-            if function not in MULTIPLE_ARGS_FUNCTIONS:
-
-                samples = func(channel.samples)
-                if function == "diff":
-                    timestamps = channel.timestamps[1:]
-                else:
-                    timestamps = channel.timestamps
-
-            elif function == "round":
-                samples = func(channel.samples, *args)
-                timestamps = channel.timestamps
-            elif function == "clip":
-                samples = func(channel.samples, *args)
-                timestamps = channel.timestamps
-
-            result = Signal(samples=samples, timestamps=timestamps, name="_")
-
-        elif type_ == "expression":
-            expression_string = description["expression"]
-            expression_string = "".join(expression_string.splitlines())
-            names = [
-                match.group("name") for match in SIG_RE.finditer(expression_string)
-            ]
-            positions = [
-                (i, match.start(), match.end())
-                for i, match in enumerate(SIG_RE.finditer(expression_string))
-            ]
-            positions.reverse()
-
-            expression = expression_string
-            for idx, start, end in positions:
-                expression = expression[:start] + f"X_{idx}" + expression[end:]
-
-            signals = [measured_signals[name] for name in names]
-            common_timebase = reduce(np.union1d, [sig.timestamps for sig in signals])
-            signals = {
-                f"X_{i}": sig.interp(common_timebase).samples
-                for i, sig in enumerate(signals)
+            _globals = {
+                "math": math,
+                "np": np,
+                "pd": pd,
             }
 
-            samples = evaluate(expression, local_dict=signals)
+            for function_name, definition in functions.items():
+                _func, _trace = generate_python_function(definition, _globals)
+
+                if function_name == description["function"]:
+                    func, trace = _func, _trace
+
+            if func is None:
+                raise Exception(trace)
+
+            signals = []
+            found_args = []
+
+            for arg, alternative_names in description["args"].items():
+                for name in alternative_names:
+                    if name in measured_signals:
+                        signals.append(measured_signals[name])
+                        found_args.append(arg)
+                        break
+
+            names = found_args + ["t"]
+
+            triggering = description.get("triggering", "triggering_on_all")
+            if triggering == "triggering_on_all":
+                timestamps = [sig.timestamps for sig in signals]
+
+                if timestamps:
+                    common_timebase = reduce(np.union1d, timestamps)
+                else:
+                    common_timebase = all_timebase
+                signals = [
+                    sig.interp(common_timebase).samples.tolist() for sig in signals
+                ]
+
+            elif triggering == "triggering_on_channel":
+                triggering_channel = description["triggering_value"]
+
+                if triggering_channel in measured_signals:
+                    common_timebase = measured_signals[triggering_channel].timestamps
+                else:
+                    common_timebase = np.array([])
+                signals = [
+                    sig.interp(common_timebase).samples.tolist() for sig in signals
+                ]
+            else:
+
+                step = float(description["triggering_value"])
+
+                common_timebase = []
+                for signal in signals:
+                    if len(signal):
+                        common_timebase.append(signal.timestamps[0])
+                        common_timebase.append(signal.timestamps[-1])
+
+                common_timebase = common_timebase or all_timebase
+
+                if common_timebase:
+                    common_timebase = np.unique(common_timebase)
+                    start = common_timebase[0]
+                    stop = common_timebase[-1]
+
+                    common_timebase = np.arange(start, stop, step)
+
+                else:
+                    common_timebase = np.array([])
+
+                signals = [
+                    sig.interp(common_timebase).samples.tolist() for sig in signals
+                ]
+
+            signals.append(common_timebase)
+
+            samples = [
+                func(**{arg_name: arg_val for arg_name, arg_val in zip(names, values)})
+                for values in zip(*signals)
+            ]
 
             result = Signal(
                 name="_",
                 samples=samples,
                 timestamps=common_timebase,
+                flags=Signal.Flags.computed,
             )
+
     except:
+        print(format_exc())
         result = Signal(
             name="_",
             samples=[],
             timestamps=[],
+            flags=Signal.Flags.computed,
         )
 
     return result
+
+
+def computation_to_python_function(description):
+    type_ = description["type"]
+
+    if type_ == "arithmetic":
+        op = description["op"]
+
+        args = []
+        fargs = {}
+
+        operand1 = description["operand1"]
+        if isinstance(operand1, dict):
+            fargs["arg1"] = []
+            args.append("arg1=0")
+            operand1 = "arg1"
+
+        elif isinstance(operand1, str):
+            try:
+                operand1 = float(operand1)
+                if operand1.is_integer():
+                    operand1 = int(operand1)
+            except:
+
+                fargs["arg1"] = [operand1]
+                args.append("arg1=0")
+                operand1 = "arg1"
+
+        operand2 = description["operand2"]
+        if isinstance(operand2, dict):
+            fargs["arg2"] = []
+            args.append("arg2=0")
+            operand2 = "arg2"
+        elif isinstance(operand2, str):
+            try:
+                operand2 = float(operand2)
+                if operand2.is_integer():
+                    operand2 = int(operand2)
+            except:
+
+                fargs["arg2"] = [operand2]
+                args.append("arg2=0")
+                operand2 = "arg2"
+
+        args.append("t=0")
+
+        function_name = f"Arithmetic_{os.urandom(6).hex()}"
+        args = ", ".join(args)
+        body = f"return {operand1} {op} {operand2}"
+
+        definition = f"def {function_name}({args}):\n    {body}"
+
+        new_description = {
+            "args": fargs,
+            "channel_comment": description["channel_comment"],
+            "channel_name": description["channel_name"],
+            "channel_unit": description["channel_unit"],
+            "definition": definition,
+            "type": "python_function",
+            "triggering": "triggering_on_all",
+            "triggering_value": "all",
+            "function": function_name,
+        }
+
+    elif type_ == "function":
+        channel = description["channel"]
+
+        args = []
+        fargs = {}
+
+        if isinstance(channel, dict):
+            fargs["arg1"] = []
+            operand = "arg1"
+            args.append("arg1=0")
+
+        elif isinstance(channel, str):
+            fargs["arg1"] = [channel]
+            operand = "arg1"
+            args.append("arg1=0")
+
+        args.append("t=0")
+
+        np_args = ", ".join([operand] + [str(e) for e in description["args"]])
+        np_function = description["name"]
+
+        function_name = f"Numpy_{os.urandom(6).hex()}"
+        args = ", ".join(args)
+        body = f"return np.{np_function}( {np_args} )"
+
+        definition = f"def {function_name}({args}):\n    {body}"
+
+        new_description = {
+            "args": fargs,
+            "channel_comment": description["channel_comment"],
+            "channel_name": description["channel_name"],
+            "channel_unit": description["channel_unit"],
+            "definition": definition,
+            "type": "python_function",
+            "triggering": "triggering_on_all",
+            "triggering_value": "all",
+            "function": function_name,
+        }
+
+    elif type_ == "expression":
+        exp = description["expression"]
+
+        args = []
+        fargs = {}
+
+        translation = {}
+
+        for match in VARIABLE.finditer(exp):
+            name = match.group("var")
+            if name not in translation:
+                arg = f"arg{len(translation)+1}"
+                translation[name] = arg
+                args.append(f"{arg}=0")
+                fargs[arg] = [name.strip("}{")]
+
+        args.append("t=0")
+
+        for name, arg in translation.items():
+            exp = exp.replace(name, arg)
+
+        function_name = f"Expression_{os.urandom(6).hex()}"
+        args = ", ".join(args)
+        body = f"return {exp}"
+
+        definition = f"def {function_name}({args}):\n    {body}"
+
+        new_description = {
+            "args": fargs,
+            "channel_comment": description["channel_comment"],
+            "channel_name": description["channel_name"],
+            "channel_unit": description["channel_unit"],
+            "definition": definition,
+            "type": "python_function",
+            "triggering": "triggering_on_all",
+            "triggering_value": "all",
+            "function": function_name,
+        }
+
+    else:
+        if "args" not in description or "function" not in description:
+            exp = description["definition"]
+
+            args = []
+            fargs = {}
+
+            translation = {}
+
+            for match in VARIABLE.finditer(exp):
+                name = match.group("var")
+                if name not in translation:
+                    arg = f"arg{len(translation) + 1}"
+                    translation[name] = arg
+                    args.append(f"{arg}=0")
+                    fargs[arg] = [name.strip("}{")]
+
+            args.append("t=0")
+
+            for name, arg in translation.items():
+                exp = exp.replace(name, arg)
+
+            function_name = description["channel_name"]
+            args = ", ".join(args)
+            body = indent(exp, "    ", lambda line: True)
+
+            definition = f"def {function_name}({args}):\n    {body}"
+
+            new_description = {
+                "args": fargs,
+                "channel_comment": description["channel_comment"],
+                "channel_name": description["channel_name"],
+                "channel_unit": description["channel_unit"],
+                "definition": definition,
+                "type": "python_function",
+                "triggering": "triggering_on_all",
+                "triggering_value": "all",
+                "function": function_name,
+            }
+        else:
+            new_description = description
+
+    return new_description
 
 
 def replace_computation_dependency(computation, old_name, new_name):
@@ -842,7 +1173,7 @@ def value_as_hex(value, dtype):
 
 def value_as_str(value, format, dtype=None, precision=3):
 
-    float_fmt = f"{{:.{precision}f}}" if precision >= 0 else "{}"
+    float_fmt = f"{{:.0{precision}f}}" if precision >= 0 else "{}"
     if isinstance(value, (float, np.floating)):
         kind = "f"
 
@@ -876,6 +1207,81 @@ def value_as_str(value, format, dtype=None, precision=3):
         string = float_fmt.format(value)
 
     return string
+
+
+def draw_color_icon(color):
+    color = QtGui.QColor(color)
+    pix = QtGui.QPixmap(64, 64)
+    painter = QtGui.QPainter(pix)
+    painter.setPen("black")
+    painter.drawRect(QtCore.QRect(0, 0, 63, 63))
+    painter.setPen(color)
+    painter.setBrush(color)
+    painter.drawRect(QtCore.QRect(1, 1, 62, 62))
+    painter.end()
+    return QtGui.QIcon(pix)
+
+
+def generate_python_function(definition, in_globals=None):
+    trace = None
+    func = None
+
+    definition = definition.replace("\t", "    ")
+
+    _globals = in_globals or {}
+    _globals.update(
+        {
+            "math": math,
+            "np": np,
+            "pd": pd,
+        }
+    )
+
+    if not definition:
+        trace = "The function definition must not be empty"
+        return func, trace
+
+    function_name = ""
+    for match in FUNC_NAME.finditer(definition):
+        function_name = match.group("name")
+
+    if not function_name:
+        trace = "The function name must not be empty"
+        return func, trace
+
+    try:
+        exec(definition, _globals)
+        func = _globals[function_name]
+    except:
+        trace = format_exc()
+        func = None
+
+    if func is not None:
+
+        args = inspect.signature(func)
+        if "t" not in args.parameters:
+            trace = 'The last function argument must be "t=0"'
+            func = None
+
+        else:
+            count = len(args.parameters)
+
+            for i, (arg_name, arg) in enumerate(args.parameters.items()):
+                if i == count - 1:
+                    if arg_name != "t":
+                        trace = 'The last function argument must be "t=0"'
+                        func = None
+
+                    elif arg.default != 0:
+                        trace = 'The last function argument must be "t=0"'
+                        func = None
+                else:
+                    if arg.default == inspect._empty:
+                        trace = f'All the arguments must have default values. The argument "{arg_name}" has no default value.'
+                        func = None
+                        break
+
+    return func, trace
 
 
 if __name__ == "__main__":

@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime, timedelta, timezone
+import json
 import os
 from pathlib import Path
+from tempfile import gettempdir
+from traceback import format_exc
 
 from natsort import natsorted
 import psutil
@@ -100,11 +103,13 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
         self.sort_by_start_time_btn.clicked.connect(self.sort_by_start_time)
 
         self.filter_view.setCurrentIndex(-1)
-        self.filter_view.currentIndexChanged.connect(self._update_channel_tree)
-        self.filter_view.currentTextChanged.connect(self._update_channel_tree)
+        self.filter_view.currentIndexChanged.connect(self.update_channel_tree)
+        self.filter_view.currentTextChanged.connect(self.update_channel_tree)
         self.filter_view.setCurrentText(
             self._settings.value("filter_view", "Internal file structure")
         )
+
+        self.filter_tree.itemChanged.connect(self.filter_changed)
 
         self.load_can_database_btn.clicked.connect(self.load_can_database)
         self.load_lin_database_btn.clicked.connect(self.load_lin_database)
@@ -127,6 +132,15 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
 
         self.aspects.setCurrentIndex(0)
         self.setAcceptDrops(True)
+
+        self.files_list.model().rowsInserted.connect(self.update_channel_tree)
+        self.files_list.model().rowsRemoved.connect(self.update_channel_tree)
+
+        self.filter_tree.itemChanged.connect(self.filter_changed)
+        self._selected_filter = set()
+        self._filter_timer = QtCore.QTimer()
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.timeout.connect(self.update_selected_filter_channels)
 
     def set_raster_type(self, event):
         if self.raster_type_channel.isChecked():
@@ -286,8 +300,6 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
                 "database_files": database_files,
                 "version": version,
                 "prefix": self.prefix.text().strip(),
-                "consolidated_j1939": self.consolidated_j1939.checkState()
-                == QtCore.Qt.Checked,
             }
 
             mdf_ = run_thread_with_progress(
@@ -329,14 +341,32 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
                 ]
                 for dbc_name, found_ids in call_info["found_ids"].items():
                     for msg_id, msg_name in sorted(found_ids):
-                        message.append(f"- 0x{msg_id:X} --> {msg_name} in <{dbc_name}>")
+
+                        try:
+                            message.append(
+                                f"- 0x{msg_id:X} --> {msg_name} in <{dbc_name}>"
+                            )
+                        except:
+                            pgn, sa = msg_id
+                            message.append(
+                                f"- PGN=0x{pgn:X} SA=0x{sa:X} --> {msg_name} in <{dbc_name}>"
+                            )
 
                 message += [
                     "",
                     "The following Bus IDs were in the MDF log file, but not matched in the DBC:",
                 ]
-                for msg_id in sorted(call_info["unknown_ids"]):
+                unknown_standard_can = sorted(
+                    [e for e in call_info["unknown_ids"] if isinstance(e, int)]
+                )
+                unknown_j1939 = sorted(
+                    [e for e in call_info["unknown_ids"] if not isinstance(e, int)]
+                )
+                for msg_id in unknown_standard_can:
                     message.append(f"- 0x{msg_id:X}")
+
+                for pgn, sa in unknown_j1939:
+                    message.append(f"- PGN=0x{pgn:X} SA=0x{sa:X}")
 
             file_name = source_file.with_suffix(
                 ".bus_logging.mdf" if version < "4.00" else ".bus_logging.mf4"
@@ -456,8 +486,6 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
                 "database_files": database_files,
                 "version": version,
                 "prefix": self.prefix.text().strip(),
-                "consolidated_j1939": self.consolidated_j1939.checkState()
-                == QtCore.Qt.Checked,
             }
 
             mdf_ = run_thread_with_progress(
@@ -605,13 +633,6 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
             self.concatenate_add_samples_origin.checkState() == QtCore.Qt.Checked
         )
 
-        if version < "4.00":
-            filter = "MDF version 3 files (*.dat *.mdf)"
-            suffix = ".mdf"
-        else:
-            filter = "MDF version 4 files (*.mf4)"
-            suffix = ".mf4"
-
         split = self.concatenate_split.checkState() == QtCore.Qt.Checked
         if split:
             split_size = int(self.concatenate_split_size.value() * 1024 * 1024)
@@ -620,16 +641,25 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
 
         compression = self.concatenate_compression.currentIndex()
 
-        output_file_name, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            "Select output measurement file",
-            "",
-            f"{filter};;All files (*.*)",
-            filter,
-        )
+        if version < "4.00":
+            output_file_name, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self,
+                "Select output measurement file",
+                "",
+                "MDF version 3 files (*.dat *.mdf);;All files (*.*)",
+                "MDF version 3 files (*.dat *.mdf)",
+            )
+        else:
+            output_file_name, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self,
+                "Select output measurement file",
+                "",
+                f"MDF version 4 files (*.mf4 *.mf4z);;All files (*.*)",
+                "MDF version 4 files (*.mf4 *.mf4z)",
+            )
 
         if output_file_name:
-            output_file_name = Path(output_file_name).with_suffix(suffix)
+            output_file_name = Path(output_file_name)
 
             progress = setup_progress(
                 parent=self,
@@ -701,13 +731,6 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
             self.stack_add_samples_origin.checkState() == QtCore.Qt.Checked
         )
 
-        if version < "4.00":
-            filter = "MDF version 3 files (*.dat *.mdf)"
-            suffix = ".mdf"
-        else:
-            filter = "MDF version 4 files (*.mf4)"
-            suffix = ".mf4"
-
         split = self.stack_split.checkState() == QtCore.Qt.Checked
         if split:
             split_size = int(self.stack_split_size.value() * 1024 * 1024)
@@ -716,16 +739,25 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
 
         compression = self.stack_compression.currentIndex()
 
-        output_file_name, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            "Select output measurement file",
-            "",
-            f"{filter};;All files (*.*)",
-            filter,
-        )
+        if version < "4.00":
+            output_file_name, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self,
+                "Select output measurement file",
+                "",
+                "MDF version 3 files (*.dat *.mdf);;All files (*.*)",
+                "MDF version 3 files (*.dat *.mdf)",
+            )
+        else:
+            output_file_name, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self,
+                "Select output measurement file",
+                "",
+                f"MDF version 4 files (*.mf4 *.mf4z);;All files (*.*)",
+                "MDF version 4 files (*.mf4 *.mf4z)",
+            )
 
         if output_file_name:
-            output_file_name = Path(output_file_name).with_suffix(suffix)
+            output_file_name = Path(output_file_name)
 
             progress = setup_progress(
                 parent=self,
@@ -781,56 +813,41 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
 
             progress.cancel()
 
+    def _as_mdf(self, file_name):
+        file_name = Path(file_name)
+        suffix = file_name.suffix.lower()
+
+        if suffix in (".erg", ".bsig", ".dl3"):
+            try:
+                from mfile import BSIG, DL3, ERG
+            except ImportError:
+                from cmerg import BSIG, ERG
+
+            if suffix == ".erg":
+                cls = ERG
+            elif suffix == ".bsig":
+                cls = BSIG
+            else:
+                cls = DL3
+
+            progress.setLabelText(
+                f"Converting file {i + 1} of {count} from {suffix} to .mf4"
+            )
+
+            mdf = cls(file_name).export_mdf()
+
+        elif suffix in (".mdf", ".mf4"):
+            mdf = MDF(file_name)
+
+        return mdf
+
     def _prepare_files(self, progress):
         count = self.files_list.count()
 
         files = [Path(self.files_list.item(row).text()) for row in range(count)]
 
         for i, file_name in enumerate(files):
-            if file_name.suffix.lower() == ".erg":
-                progress.setLabelText(
-                    f"Converting file {i+1} of {count} from erg to mdf"
-                )
-                try:
-                    from mfile import ERG
-
-                    files[i] = ERG(file_name).export_mdf()
-                except Exception as err:
-                    print(err)
-                    return
-            elif file_name.suffix.lower() == ".dl3":
-                progress.setLabelText(
-                    f"Converting file {i+1} of {count} from dl3 to mdf"
-                )
-                datalyser_active = any(
-                    proc.name() == "Datalyser3.exe" for proc in psutil.process_iter()
-                )
-                try:
-                    import win32com.client
-
-                    index = 0
-                    while True:
-                        mdf_name = file_name.with_suffix(f".{index}.mdf")
-                        if mdf_name.exists():
-                            index += 1
-                        else:
-                            break
-
-                    datalyser = win32com.client.Dispatch("Datalyser3.Datalyser3_COM")
-                    if not datalyser_active:
-                        try:
-                            datalyser.DCOM_set_datalyser_visibility(False)
-                        except:
-                            pass
-                    datalyser.DCOM_convert_file_mdf_dl3(file_name, str(mdf_name), 0)
-                    if not datalyser_active:
-                        datalyser.DCOM_TerminateDAS()
-                    files[i] = mdf_name
-                except Exception as err:
-                    print(err)
-                    return
-            elif file_name.suffix.lower() in (".mdf", ".mf4"):
-                files[i] = MDF(file_name)
+            files[i] = self._as_mdf(file_name)
 
         return files
 
@@ -905,15 +922,26 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
                 self._selected_filter.remove(name)
         self._filter_timer.start(10)
 
-    def update_selected_filter_channels(self):
+    def update_selected_filter_channels(self, *args):
         self.selected_filter_channels.clear()
         self.selected_filter_channels.addItems(sorted(self._selected_filter))
 
     def search(self, event=None):
-        if not self.files_list.count():
+        count = self.files_list.count()
+        if not count:
             return
 
-        with MDF(self.files_list.item(0).text()) as mdf:
+        source_files = [Path(self.files_list.item(row).text()) for row in range(count)]
+
+        for file_name in source_files:
+            if file_name.suffix.lower() in (".mdf", ".mf4"):
+                break
+        else:
+            file_name = source_files[0]
+
+        mdf = self._as_mdf(file_name)
+
+        try:
 
             widget = self.filter_tree
             view = self.filter_view
@@ -990,8 +1018,12 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
                             item.setCheckState(0, QtCore.Qt.Checked)
 
                         iterator += 1
+        except:
+            print(format_exc())
+        finally:
+            mdf.close()
 
-    def _update_channel_tree(self, index=None):
+    def update_channel_tree(self, *args):
         if self.filter_view.currentIndex() == -1:
             return
 
@@ -1002,7 +1034,15 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
             return
         else:
             uuid = os.urandom(6).hex()
-            with MDF(source_files[0]) as mdf:
+
+            for file_name in source_files:
+                if file_name.suffix.lower() in (".mdf", ".mf4"):
+                    break
+            else:
+                file_name = source_files[0]
+
+            mdf = self._as_mdf(file_name)
+            try:
 
                 widget = self.filter_tree
                 view = self.filter_view
@@ -1098,6 +1138,10 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
                     else:
                         items.sort(key=lambda x: x.name)
                     widget.addTopLevelItems(items)
+            except:
+                print(format_exc())
+            finally:
+                mdf.close()
 
     def _current_options(self):
         options = {
@@ -1726,7 +1770,7 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
         file_name, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Select output filter list file",
-            self.default_folder,
+            "",
             "CANape Lab file (*.lab);;TXT files (*.txt);;All file types (*.lab *.txt)",
             "CANape Lab file (*.lab)",
         )
@@ -1782,7 +1826,7 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
                 self,
                 "Select channel list file",
                 "",
-                "Config file (*.cfg);;TXT files (*.txt);;Display files (*.dsp);;CANape Lab file (*.lab);;All file types (*.cfg *.dsp *.lab *.txt)",
+                "Config file (*.cfg);;Display files (*.dsp *.dspf);;CANape Lab file (*.lab);;All file types (*.cfg *.dsp *.dspf *.lab)",
                 "CANape Lab file (*.lab)",
             )
 
@@ -1814,19 +1858,14 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
                         else:
                             channels = list(info.values())[0]
 
-                elif extension == ".cfg":
+                elif extension in (".cfg", ".dspf"):
+
                     with open(file_name, "r") as infile:
                         info = json.load(infile)
+
                     channels = info.get("selected_channels", [])
-                elif extension == ".txt":
-                    try:
-                        with open(file_name, "r") as infile:
-                            info = json.load(infile)
-                        channels = info.get("selected_channels", [])
-                    except:
-                        with open(file_name, "r") as infile:
-                            channels = [line.strip() for line in infile.readlines()]
-                            channels = [name for name in channels if name]
+                else:
+                    channels = []
 
             else:
                 info = file_name

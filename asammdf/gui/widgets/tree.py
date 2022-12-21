@@ -1,15 +1,19 @@
 # -*- coding: utf-8 -*-
 from datetime import date, datetime
+from enum import IntFlag
 from functools import lru_cache
 import json
 import os
 from traceback import format_exc
 
+import numpy as np
 from pyqtgraph import functions as fn
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from .. import utils
+from ...signal import Signal
 from ..dialogs.advanced_search import AdvancedSearch
+from ..dialogs.conversion_editor import ConversionEditor
 from ..dialogs.range_editor import RangeEditor
 from ..utils import (
     copy_ranges,
@@ -375,15 +379,19 @@ class Delegate(QtWidgets.QItemDelegate):
         if brush is not None:
             color = brush.color()
 
-            light = sum(color.getRgb()[:-1]) / 2
-            if light >= 383:
-                complementary = fn.mkColor("#000000")
-            else:
-                complementary = fn.mkColor("#ffffff")
+            complementary = fn.mkColor("#000000")
             option.palette.setColor(QtGui.QPalette.Highlight, color)
             option.palette.setColor(QtGui.QPalette.HighlightedText, complementary)
 
         super().paint(pinter, option, index)
+
+
+class ChannelsTreeFlags(IntFlag):
+    DetailsEnabled = 1
+    HideMissingChannels = 1 << 1
+    HideDisabledChannels = 1 << 2
+    CanDeleteItems = 1 << 3
+    CanInsertItems = 1 << 4
 
 
 class ChannelsTreeWidget(QtWidgets.QTreeWidget):
@@ -395,6 +403,7 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
     edit_computation = QtCore.Signal(object)
     pattern_group_added = QtCore.Signal(object)
     compute_fft_request = QtCore.Signal(str)
+    conversion_changed = QtCore.Signal(str, object)
     color_changed = QtCore.Signal(str, object)
     unit_changed = QtCore.Signal(str, str)
     name_changed = QtCore.Signal(str, str)
@@ -438,6 +447,7 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
         self.setExpandsOnDoubleClick(False)
 
         self.setMinimumWidth(5)
+        self.header().setMinimumSectionSize(10)
         self.header().resizeSection(self.CommonAxisColumn, 10)
         self.header().resizeSection(self.IndividualAxisColumn, 10)
         self.header().setSectionResizeMode(
@@ -463,9 +473,10 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
         self.idel = Delegate(self)
         self.setItemDelegate(self.idel)
 
-        palette = self.palette()
-        background = palette.brush(QtGui.QPalette.Window).color().name()
-        if palette.brush(QtGui.QPalette.Window).color().red() < 0x80:
+        settings = QtCore.QSettings()
+
+        background = QtGui.QColor(55, 55, 55).name()
+        if settings.value("current_theme") == "Dark":
             self._dark = True
             self._font_size = self.font().pointSize()
             self._background = background
@@ -610,6 +621,7 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
                 show_add_window=False,
                 show_apply=True,
                 show_search=False,
+                show_pattern=True,
                 window_title="Add pattern based group",
                 parent=self,
             )
@@ -720,14 +732,29 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
                         item.color = color
 
         elif modifiers == QtCore.Qt.ControlModifier and key == QtCore.Qt.Key_C:
+            selected_items = validate_drag_items(
+                self.invisibleRootItem(), self.selectedItems(), []
+            )
+            data = get_data(self.plot, selected_items, uuids_only=False)
+            data = substitude_mime_uuids(data, None, force=True)
+            QtWidgets.QApplication.instance().clipboard().setText(json.dumps(data))
+
+        elif modifiers == QtCore.Qt.ControlModifier and key == QtCore.Qt.Key_V:
+            try:
+                data = QtWidgets.QApplication.instance().clipboard().text()
+                data = json.loads(data)
+                self.add_channels_request.emit(data)
+            except:
+                pass
+
+        elif modifiers == QtCore.Qt.ControlModifier and key == QtCore.Qt.Key_N:
             selected_items = self.selectedItems()
             if not selected_items:
                 return
             else:
                 item = selected_items[0]
 
-            name = item.signal.name
-            QtWidgets.QApplication.instance().clipboard().setText(name)
+            QtWidgets.QApplication.instance().clipboard().setText(item.name)
 
         elif modifiers == QtCore.Qt.ControlModifier and key == QtCore.Qt.Key_R:
             selected_items = self.selectedItems()
@@ -766,8 +793,11 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
                             item.set_value(item._value, update=True)
 
                         elif item.type() == item.Group:
-                            item.set_ranges(dlg.result)
+                            item.set_ranges(copy_ranges(dlg.result))
                             item.update_child_values()
+
+            self.refresh()
+            self.plot.plot.update()
 
         elif (
             modifiers == (QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier)
@@ -786,6 +816,7 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
             modifiers == (QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier)
             and key == QtCore.Qt.Key_P
         ):
+
             info = QtWidgets.QApplication.instance().clipboard().text()
             selected_items = self.selectedItems()
             if not selected_items:
@@ -795,7 +826,7 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
                 info = json.loads(info)
                 info["color"] = fn.mkColor(info["color"])
             except:
-                pass
+                print(format_exc())
             else:
                 for item in selected_items:
                     try:
@@ -821,7 +852,7 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
                         item.set_ranges(info["ranges"])
 
                     except:
-                        pass
+                        print(format_exc())
 
         elif modifiers == (
             QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier
@@ -834,6 +865,8 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
         elif modifiers == QtCore.Qt.ShiftModifier and key in (
             QtCore.Qt.Key_Up,
             QtCore.Qt.Key_Down,
+            QtCore.Qt.Key_Left,
+            QtCore.Qt.Key_Right,
         ):
             event.ignore()
         else:
@@ -863,12 +896,12 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
         menu.addSeparator()
 
         if item and item.type() == ChannelsTreeItem.Channel:
-            menu.addAction(self.tr("Copy name [Ctrl+C]"))
+            menu.addAction(self.tr("Copy name [Ctrl+N]"))
             menu.addAction(self.tr("Copy display properties [Ctrl+Shift+C]"))
             menu.addAction(self.tr("Paste display properties [Ctrl+Shift+P]"))
 
-        menu.addAction(self.tr("Copy channel structure"))
-        menu.addAction(self.tr("Paste channel structure"))
+        menu.addAction(self.tr("Copy channel structure [Ctrl+C]"))
+        menu.addAction(self.tr("Paste channel structure [Ctrl+V]"))
 
         if item and item.type() == ChannelsTreeItem.Channel:
             menu.addAction(self.tr("Rename channel"))
@@ -905,6 +938,8 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
         menu.addAction(self.tr("Set color [C]"))
         menu.addAction(self.tr("Set precision"))
         menu.addAction(self.tr("Set color ranges [Ctrl+R]"))
+        menu.addAction(self.tr("Set channel conversion"))
+        menu.addAction(self.tr("Set channel comment"))
         menu.addAction(self.tr("Set unit"))
         menu.addSeparator()
 
@@ -912,10 +947,9 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
             menu.addSeparator()
             menu.addAction(self.tr("Relative time base shift"))
             menu.addAction(self.tr("Set time base start offset"))
-            menu.addSeparator()
-            menu.addAction(self.tr("Insert computation using this channel"))
 
-            if item.signal.computed:
+            if item.signal.flags & Signal.Flags.computed:
+                menu.addSeparator()
                 menu.addAction(self.tr("Edit this computed channel"))
 
             try:
@@ -941,20 +975,26 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
         if action is None:
             return
 
-        if action.text() == "Copy name [Ctrl+C]":
+        if action.text() == "Copy name [Ctrl+N]":
             event = QtGui.QKeyEvent(
-                QtCore.QEvent.KeyPress, QtCore.Qt.Key_C, QtCore.Qt.ControlModifier
+                QtCore.QEvent.KeyPress, QtCore.Qt.Key_N, QtCore.Qt.ControlModifier
             )
             self.keyPressEvent(event)
 
         elif action.text() == "Activate group":
-            item.set_disabled(False)
+            if item.isDisabled():
+                item.set_disabled(False)
+                item.setIcon(item.NameColumn, QtGui.QIcon(":/open.png"))
             self.group_activation_changed.emit()
 
         elif action.text() == "Deactivate groups":
             for item in self.selectedItems():
                 if item.type() == item.Group:
-                    item.set_disabled(True)
+                    if not item.isDisabled():
+                        item.set_disabled(True)
+                        item.setIcon(item.NameColumn, QtGui.QIcon(":/erase.png"))
+                    self.plot.plot.update()
+
             self.group_activation_changed.emit()
 
         elif action.text() == "Set color [C]":
@@ -973,21 +1013,70 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
             )
             self.keyPressEvent(event)
 
-        elif action.text() == "Copy channel structure":
-            selected_items = validate_drag_items(
-                self.invisibleRootItem(), self.selectedItems(), []
-            )
-            data = get_data(self.plot, selected_items, uuids_only=False)
-            data = substitude_mime_uuids(data, None, force=True)
-            QtWidgets.QApplication.instance().clipboard().setText(json.dumps(data))
+        elif action.text() == "Set channel conversion":
+            selected_items = self.selectedItems()
+            if not selected_items:
+                return
 
-        elif action.text() == "Paste channel structure":
-            try:
-                data = QtWidgets.QApplication.instance().clipboard().text()
-                data = json.loads(data)
-                self.add_channels_request.emit(data)
-            except:
-                pass
+            if len(selected_items) == 1:
+                item = selected_items[0]
+                if item.type() == ChannelsTreeItem.Channel:
+                    conversion = item.signal.conversion
+                    channel_name = item.name
+                else:
+                    conversion = None
+                    channel_name = item.name
+            else:
+                conversion = None
+                channel_name = "selected items"
+
+            dlg = ConversionEditor(channel_name, conversion, parent=self)
+            dlg.exec_()
+            if dlg.pressed_button == "apply":
+                conversion = dlg.conversion()
+
+                for item in selected_items:
+                    if item.type() in (
+                        ChannelsTreeItem.Channel,
+                        ChannelsTreeItem.Group,
+                    ):
+                        item.set_conversion(conversion)
+
+        elif action.text() == "Set channel comment":
+            selected_items = self.selectedItems()
+            if not selected_items:
+                return
+
+            for item in selected_items:
+                if item.type() == ChannelsTreeItem.Channel:
+                    comment = item.comment
+
+            new_comment, ok = QtWidgets.QInputDialog.getMultiLineText(
+                self,
+                "Input new comment",
+                "New comment:",
+                comment,
+            )
+
+            if ok:
+                for item in selected_items:
+                    item.comment = new_comment
+
+        elif action.text() == "Copy channel structure [Ctrl+C]":
+            event = QtGui.QKeyEvent(
+                QtCore.QEvent.KeyPress,
+                QtCore.Qt.Key_C,
+                QtCore.Qt.ControlModifier,
+            )
+            self.keyPressEvent(event)
+
+        elif action.text() == "Paste channel structure [Ctrl+V]":
+            event = QtGui.QKeyEvent(
+                QtCore.QEvent.KeyPress,
+                QtCore.Qt.Key_V,
+                QtCore.Qt.ControlModifier,
+            )
+            self.keyPressEvent(event)
 
         elif action.text() == "Copy display properties [Ctrl+Shift+C]":
             event = QtGui.QKeyEvent(
@@ -1213,14 +1302,6 @@ class ChannelsTreeWidget(QtWidgets.QTreeWidget):
                     self.show_properties.emit(item.uuid)
                 elif item.type() == ChannelsTreeItem.Group:
                     item.show_info()
-
-        elif action.text() == "Insert computation using this channel":
-            selected_items = self.selectedItems()
-            if len(selected_items) == 1:
-                item = selected_items[0]
-                if item.type() == ChannelsTreeItem.Channel:
-                    self.drop_target = item
-                    self.insert_computation.emit(item.name)
 
         elif action.text() == "Edit this computed channel":
             self.edit_computation.emit(item)
@@ -1509,7 +1590,7 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
             self.setCheckState(self.CommonAxisColumn, QtCore.Qt.Unchecked)
             self.setCheckState(self.IndividualAxisColumn, QtCore.Qt.Unchecked)
 
-            if signal.computed:
+            if signal.flags & Signal.Flags.computed:
                 font = self.font(0)
                 font.setItalic(True)
                 for column in (self.NameColumn, self.ValueColumn, self.UnitColumn):
@@ -1527,7 +1608,7 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
         self.setTextAlignment(self.ValueColumn, QtCore.Qt.AlignRight)
 
     def __repr__(self):
-        return f"ChannelTreeItem(type={self.type()}, uuid={self.uuid}, origin_uuid={self.origin_uuid})"
+        return f"ChannelTreeItem(type={self.type()}, name={self.name}, uuid={self.uuid}, origin_uuid={self.origin_uuid})"
 
     @property
     def color(self):
@@ -1563,6 +1644,26 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
             for row in range(count):
                 child = self.child(row)
                 child.color = value
+
+    @property
+    def comment(self):
+        type = self.type()
+        if type == self.Channel:
+            return self.signal.comment
+        else:
+            return ""
+
+    @comment.setter
+    def comment(self, value):
+        type = self.type()
+        if type == self.Channel:
+            self.signal.comment = value
+            self.signal.flags |= Signal.Flags.user_defined_comment
+
+            tooltip = (
+                getattr(self.signal, "tooltip", "") or f"{self.signal.name}\n{value}"
+            )
+            self.setToolTip(self.NameColumn, tooltip)
 
     def copy(self):
         type = self.type()
@@ -1723,7 +1824,12 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
         if type == self.Group:
             self._name = text
         elif type == self.Channel:
-            self.signal.name = text
+
+            if text != self.signal.name:
+                self.signal.name = text
+                if not self.signal.flags & Signal.Flags.computed:
+                    self.signal.flags |= Signal.Flags.user_defined_name
+
         else:
             self._name = text
         self.setText(self.NameColumn, self.name)
@@ -1758,6 +1864,47 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
         for row in range(count):
             item = self.child(row)
             item.reset_resolved_ranges()
+
+    def set_conversion(self, conversion):
+        if self.type() == self.Channel:
+            self.signal.conversion = conversion
+            self.signal.flags |= Signal.Flags.user_defined_conversion
+
+            self.signal.text_conversion = None
+
+            if self.signal.conversion:
+                samples = self.signal.conversion.convert(self.signal.samples)
+                if samples.dtype.kind not in "SUV":
+                    nans = np.isnan(samples)
+                    if np.any(nans):
+                        self.signal.raw_samples = self.signal.samples[~nans]
+                        self.signal.phys_samples = samples[~nans]
+                        self.signal.timestamps = self.signal.timestamps[~nans]
+                        self.signal.samples = self.signal.samples[~nans]
+                    else:
+                        self.signal.raw_samples = self.signal.samples
+                        self.signal.phys_samples = samples
+                else:
+                    self.signal.text_conversion = self.signal.conversion
+                    self.signal.phys_samples = (
+                        self.signal.raw_samples
+                    ) = self.signal.samples
+
+                self.unit = conversion.unit
+            else:
+                self.signal.phys_samples = self.signal.raw_samples = self.signal.samples
+
+            self.set_value(update=True)
+
+            tree = self.treeWidget()
+            if tree:
+                tree.conversion_changed.emit(self.uuid, conversion)
+
+        elif self.type() == self.Group:
+            count = self.childCount()
+            for i in range(count):
+                child = self.child(i)
+                child.set_conversion(conversion)
 
     def set_disabled(self, disabled):
         if self.type() == self.Channel:
@@ -1820,6 +1967,7 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
             )
 
             utils.NO_ICON = QtGui.QIcon()
+            utils.NO_ERROR_ICON = QtGui.QIcon()
 
         if ranges:
             self.setIcon(self.ValueColumn, utils.RANGE_INDICATOR_ICON)
@@ -1854,15 +2002,7 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
                 )
             self.ranges.append(range_info)
 
-        self.resolved_ranges = None
-
-    # @timeit
-    # def setBackground(self, col, c):
-    #     super().setBackground(col, c)
-
-    # @timeit
-    # def setForeground(self, col, c):
-    #     super().setForeground(col, c)
+        self.reset_resolved_ranges()
 
     def set_value(self, value=None, update=False, force=False):
         update_text = (value != self._value) or force
@@ -1974,8 +2114,9 @@ class ChannelsTreeItem(QtWidgets.QTreeWidgetItem):
 
     @unit.setter
     def unit(self, text):
-        if self.type() == self.Channel:
+        if self.type() == self.Channel and self.signal.unit != text:
             self.signal.unit = text
+            self.signal.flags |= Signal.Flags.user_defined_unit
             self.setText(self.UnitColumn, text)
             tree = self.treeWidget()
             if tree:

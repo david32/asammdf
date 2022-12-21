@@ -7,11 +7,12 @@ from __future__ import annotations
 import bisect
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence, Sized
+from datetime import datetime
 from functools import lru_cache
 from hashlib import md5
 from io import BufferedReader, BytesIO
 import logging
-from math import ceil
+from math import ceil, floor
 import mmap
 import os
 from pathlib import Path
@@ -159,6 +160,9 @@ VALID_DATA_TYPES = v4c.VALID_DATA_TYPES
 
 EMPTY_TUPLE = tuple()
 
+# 100 extra steps for the sorting, 1 step after sorting and 1 step at finish
+SORT_STEPS = 102
+
 
 logger = logging.getLogger("asammdf")
 
@@ -270,6 +274,11 @@ class MDF4(MDF_Common):
         channels: list[str] | None = None,
         **kwargs,
     ) -> None:
+
+        if not kwargs.get("__internal__", False):
+            raise MdfException(
+                "Always use the MDF class; do not use the class MDF4 directly"
+            )
 
         self._kwargs = kwargs
         self.original_name = kwargs["original_name"]
@@ -474,8 +483,9 @@ class MDF4(MDF_Common):
         stream.seek(0)
 
         cg_count, _ = count_channel_groups(stream)
+        progress_steps = cg_count + SORT_STEPS
         if self._callback:
-            self._callback(0, cg_count)
+            self._callback(0, progress_steps)
         current_cg_index = 0
 
         self.identification = FileIdentificationBlock(stream=stream, mapped=mapped)
@@ -607,7 +617,7 @@ class MDF4(MDF_Common):
 
                 current_cg_index += 1
                 if self._callback:
-                    self._callback(current_cg_index, cg_count)
+                    self._callback(current_cg_index, progress_steps)
 
                 if self._terminate:
                     self.close()
@@ -773,7 +783,13 @@ class MDF4(MDF_Common):
                     else:
                         break
 
-        self._sort()
+        self._sort(
+            current_progress_index=current_cg_index, max_progress_count=progress_steps
+        )
+        if self._callback:
+            self._callback(
+                progress_steps - 1, progress_steps
+            )  # second to last step now
 
         for grp in self.groups:
             channels = grp.channels
@@ -826,6 +842,11 @@ class MDF4(MDF_Common):
 
         self._interned_strings.clear()
         self._attachments_map.clear()
+
+        if self._callback:
+            self._callback(
+                progress_steps, progress_steps
+            )  # last step, we've completely loaded the file for sure
 
         self.progress = cg_count, cg_count
 
@@ -1071,13 +1092,24 @@ class MDF4(MDF_Common):
                     if ca_block.storage != v4c.CA_STORAGE_TYPE_CN_TEMPLATE:
                         logger.warning("Only CN template arrays are supported")
                     ca_list = [ca_block]
+
                     while ca_block.composition_addr:
-                        ca_block = ChannelArrayBlock(
-                            address=ca_block.composition_addr,
-                            stream=stream,
-                            mapped=mapped,
-                        )
-                        ca_list.append(ca_block)
+                        stream.seek(ca_block.composition_addr)
+                        blk_id = stream.read(4)
+                        if blk_id == b"##CA":
+                            ca_block = ChannelArrayBlock(
+                                address=ca_block.composition_addr,
+                                stream=stream,
+                                mapped=mapped,
+                            )
+                            ca_list.append(ca_block)
+                        else:
+                            logger.warning(
+                                "skipping CN block; CN block within CA block"
+                                " is not implemented yet"
+                            )
+                            break
+
                     dependencies.append(ca_list)
 
                     channel.dtype_fmt = dtype(
@@ -1621,9 +1653,7 @@ class MDF4(MDF_Common):
                 else:
                     yield b"", 0, 0, None
 
-    def _prepare_record(
-        self, group: Group
-    ) -> tuple[dict[int, tuple[str, int]], dtype[Any]]:
+    def _prepare_record(self, group: Group) -> list:
         """compute record
 
         Parameters
@@ -1655,15 +1685,10 @@ class MDF4(MDF_Common):
 
                 if ch_type not in v4c.VIRTUAL_TYPES and not dependency_list:
 
-                    if not new_ch.dtype_fmt:
-                        new_ch.dtype_fmt = dtype(
-                            get_fmt_v4(data_type, bit_count, ch_type)
-                        )
-
                     # adjust size to 1, 2, 4 or 8 bytes
                     size = bit_offset + bit_count
 
-                    byte_size, rem = size // 8, size % 8
+                    byte_size, rem = divmod(size, 8)
                     if rem:
                         byte_size += 1
                     bit_size = byte_size * 8
@@ -1678,6 +1703,9 @@ class MDF4(MDF_Common):
                             bit_offset += 32 - bit_size
                         elif size > 8:
                             bit_offset += 16 - bit_size
+
+                    if not new_ch.dtype_fmt:
+                        new_ch.dtype_fmt = dtype(get_fmt_v4(data_type, size, ch_type))
 
                     if (
                         bit_offset
@@ -2877,7 +2905,7 @@ class MDF4(MDF_Common):
                     if sig_dtype.kind == "u" and signal.bit_count <= 4:
                         s_size = signal.bit_count
 
-                    if signal.stream_sync:
+                    if signal.flags & signal.Flags.stream_sync:
                         channel_type = v4c.CHANNEL_TYPE_SYNC
                         if signal.attachment:
                             at_data, at_name, hash_sum = signal.attachment
@@ -3829,7 +3857,7 @@ class MDF4(MDF_Common):
                 if sig_dtype.kind == "u" and signal.bit_count <= 4:
                     s_size = signal.bit_count
 
-                if signal.stream_sync:
+                if signal.flags & signal.Flags.stream_sync:
                     channel_type = v4c.CHANNEL_TYPE_SYNC
                     if signal.attachment:
                         at_data, at_name, hash_sum = signal.attachment
@@ -6324,33 +6352,22 @@ class MDF4(MDF_Common):
             else:
 
                 # for external attachments read the file and return the content
-                if flags & v4c.FLAG_AT_MD5_VALID:
-                    data = open(file_path, "rb").read()
+                data = file_path.read_bytes()
 
-                    md5_worker = md5()
-                    md5_worker.update(data)
-                    md5_sum = md5_worker.digest()
-                    if attachment["md5_sum"] == md5_sum:
-                        if attachment.mime.startswith("text"):
-                            with open(file_path, "r") as f:
-                                data = f.read()
-                    else:
-                        message = (
-                            f'ATBLOCK md5sum="{attachment["md5_sum"]}" '
-                            f"and external attachment data ({file_path}) "
-                            f'md5sum="{md5_sum}"'
-                        )
-                        logger.warning(message)
-                else:
-                    if attachment.mime.startswith("text"):
-                        mode = "r"
-                    else:
-                        mode = "rb"
-                    with open(file_path, mode) as f:
-                        data = f.read()
-                        md5_worker = md5()
-                        md5_worker.update(data)
-                        md5_sum = md5_worker.digest()
+                md5_worker = md5()
+                md5_worker.update(data)
+                md5_sum = md5_worker.digest()
+
+                if attachment.mime.startswith("text"):
+                    data = data.decode("utf-8", errors="replace")
+
+                if flags & v4c.FLAG_AT_MD5_VALID and attachment["md5_sum"] != md5_sum:
+                    message = (
+                        f'ATBLOCK md5sum="{attachment["md5_sum"]}" '
+                        f"and external attachment data ({file_path}) "
+                        f'md5sum="{md5_sum}"'
+                    )
+                    logger.warning(message)
 
         except Exception as err:
             os.chdir(current_path)
@@ -6575,6 +6592,7 @@ class MDF4(MDF_Common):
                     record_offset=record_offset,
                     record_count=record_count,
                     master_is_required=master_is_required,
+                    raw=raw,
                 )
             else:
                 vals, timestamps, invalidation_bits, encoding = self._get_array(
@@ -6652,7 +6670,10 @@ class MDF4(MDF_Common):
 
             master_metadata = self._master_channel_metadata.get(gp_nr, None)
 
-            stream_sync = channel_type == v4c.CHANNEL_TYPE_SYNC
+            if channel_type == v4c.CHANNEL_TYPE_SYNC:
+                flags = Signal.Flags.stream_sync
+            else:
+                flags = Signal.Flags.no_flags
 
             try:
                 res = Signal(
@@ -6668,7 +6689,7 @@ class MDF4(MDF_Common):
                     source=source,
                     display_names=channel.display_names,
                     bit_count=channel.bit_count,
-                    stream_sync=stream_sync,
+                    flags=flags,
                     invalidation_bits=invalidation_bits,
                     encoding=encoding,
                     group_index=gp_nr,
@@ -6693,6 +6714,7 @@ class MDF4(MDF_Common):
         record_offset: int,
         record_count: int | None,
         master_is_required: bool,
+        raw: bool,
     ) -> tuple[NDArray[Any], NDArray[Any] | None, NDArray[Any] | None, None]:
         grp = group
         gp_nr = group_index
@@ -6766,7 +6788,7 @@ class MDF4(MDF_Common):
                         ignore_invalidation_bits=ignore_invalidation_bits,
                         record_offset=record_offset,
                         record_count=record_count,
-                        raw=True,
+                        raw=raw,
                     )[0]
                     channel_values[i].append(vals)
                 if master_is_required:
@@ -7568,6 +7590,7 @@ class MDF4(MDF_Common):
                 signal_data = b""
 
             if signal_data:
+
                 if data_type in (
                     v4c.DATA_TYPE_BYTEARRAY,
                     v4c.DATA_TYPE_UNSIGNED_INTEL,
@@ -7595,9 +7618,17 @@ class MDF4(MDF_Common):
 
                     elif data_type == v4c.DATA_TYPE_STRING_UTF_8:
                         encoding = "utf-8"
+                        vals = np.array(
+                            [e.rsplit(b"\0")[0] for e in vals.tolist()],
+                            dtype=vals.dtype,
+                        )
 
                     elif data_type == v4c.DATA_TYPE_STRING_LATIN_1:
                         encoding = "latin-1"
+                        vals = np.array(
+                            [e.rsplit(b"\0")[0] for e in vals.tolist()],
+                            dtype=vals.dtype,
+                        )
 
                     else:
                         raise MdfException(
@@ -8280,7 +8311,9 @@ class MDF4(MDF_Common):
                         t = frombuffer(buffer, dtype=time_ch.dtype_fmt)
 
                 else:
-                    dtype_, byte_size, byte_offset, bti_count = group.record[time_ch_nr]
+                    dtype_, byte_size, byte_offset, bit_offset = group.record[
+                        time_ch_nr
+                    ]
 
                     if one_piece:
                         data_bytes = data[0]
@@ -8319,6 +8352,38 @@ class MDF4(MDF_Common):
                         )
 
                         t = frombuffer(buffer, dtype=dtype_)
+
+                    if not time_ch.standard_C_size:
+                        channel_dtype = time_ch.dtype_fmt
+                        bit_count = time_ch.bit_count
+                        data_type = time_ch.data_type
+
+                        size = byte_size
+
+                        if channel_dtype.byteorder == "|" and time_ch.data_type in (
+                            v4c.DATA_TYPE_SIGNED_MOTOROLA,
+                            v4c.DATA_TYPE_UNSIGNED_MOTOROLA,
+                        ):
+                            view = f">u{t.itemsize}"
+                        else:
+                            view = f"{channel_dtype.byteorder}u{t.itemsize}"
+
+                        if dtype(view) != t.dtype:
+                            t = t.view(view)
+
+                        if bit_offset:
+                            t >>= bit_offset
+
+                        if bit_count != size * 8:
+                            if data_type in v4c.SIGNED_INT:
+                                t = as_non_byte_sized_signed_int(t, bit_count)
+                            else:
+                                mask = (1 << bit_count) - 1
+                                t &= mask
+                        elif data_type in v4c.SIGNED_INT:
+                            view = f"{channel_dtype.byteorder}i{t.itemsize}"
+                            if dtype(view) != t.dtype:
+                                t = t.view(view)
 
                 # get timestamps
                 if time_conv:
@@ -8902,6 +8967,23 @@ class MDF4(MDF_Common):
                 inf[f"channel {j}"] = f'name="{name}" type={ch_type}'
 
         return info
+
+    @property
+    def start_time(self) -> datetime:
+        """getter and setter the measurement start timestamp
+
+        Returns
+        -------
+        timestamp : datetime.datetime
+            start timestamp
+
+        """
+
+        return self.header.start_time
+
+    @start_time.setter
+    def start_time(self, timestamp: datetime) -> None:
+        self.header.start_time = timestamp
 
     def save(
         self,
@@ -10126,7 +10208,12 @@ class MDF4(MDF_Common):
             )
         self.identification.file_identification = b"MDF     "
 
-    def _sort(self, compress: bool = True) -> None:
+    def _sort(
+        self,
+        compress: bool = True,
+        current_progress_index: int = 0,
+        max_progress_count: int = 0,
+    ) -> None:
         if self._file is None:
             return
 
@@ -10182,7 +10269,13 @@ class MDF4(MDF_Common):
                 raise MdfException(message)
 
             rem = b""
-            for info in group.get_data_blocks():
+            blocks = list(group.get_data_blocks())  # might be expensive ?
+            # most of the steps are for sorting, but the last 2 are after we've done sorting
+            # so remove the 2 steps that are not related to sorting from the count
+            step = float(SORT_STEPS - 2) / len(blocks) / len(common)
+            index = float(current_progress_index)
+            previous = index
+            for info in blocks:
                 dtblock_address, dtblock_raw_size, dtblock_size, block_type, param = (
                     info.address,
                     info.original_size,
@@ -10190,6 +10283,20 @@ class MDF4(MDF_Common):
                     info.block_type,
                     info.param,
                 )
+
+                index += step
+
+                # if we've been told to notify about progress
+                # and we've been given a max progress count (only way we can do progress updates)
+                # and there's a tick update (at least 1 integer between the last update and the current index)
+                # then we can notify about the callback progress
+                if (
+                    self._callback
+                    and max_progress_count
+                    and floor(previous) < floor(index)
+                ):
+                    self._callback(floor(index), max_progress_count)
+                    previous = index
 
                 seek(dtblock_address)
 
@@ -10542,6 +10649,8 @@ class MDF4(MDF_Common):
 
                 bus_map = self.bus_logging_map["CAN"].setdefault(bus, {})
                 bus_map[int(msg_id)] = group_index
+
+            self._set_temporary_master(None)
 
         elif dbc is None:
             self._prepare_record(group)

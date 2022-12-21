@@ -1,170 +1,74 @@
 # -*- coding: utf-8 -*-
 from functools import partial
+import inspect
 import os
 import re
 from traceback import format_exc
 
-import numpy as np
-from PySide6 import QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
+from ...signal import Signal
 from ..ui import resource_rc
 from ..ui.define_channel_dialog import Ui_ComputedChannel
+from ..utils import computation_to_python_function
+from ..widgets.python_highlighter import PythonHighlighter
 from .advanced_search import AdvancedSearch
 
 SIG_RE = re.compile(r"\{\{(?!\}\})(?P<name>.*?)\}\}")
-
-SHORT_OPS = [
-    "+",
-    "-",
-    "/",
-    "//",
-    "*",
-    "%",
-    "**",
-    "^",
-    "&",
-    "|",
-    ">>",
-    "<<",
-]
-
-
-FUNCTIONS = [
-    "absolute",
-    "arccos",
-    "arcsin",
-    "arctan",
-    "cbrt",
-    "ceil",
-    "clip",
-    "cos",
-    "cumprod",
-    "cumsum",
-    "deg2rad",
-    "degrees",
-    "diff",
-    "exp",
-    "fix",
-    "floor",
-    "gradient",
-    "log",
-    "log10",
-    "log2",
-    "rad2deg",
-    "radians",
-    "rint",
-    "round",
-    "sin",
-    "sqrt",
-    "square",
-    "tan",
-    "trunc",
-]
-
-ARGS_COUNT = {
-    **{name: 0 for name in FUNCTIONS},
-    "clip": 2,
-    "round": 1,
-}
-
-
-MULTIPLE_ARGS_FUNCTIONS = {
-    "clip",
-    "round",
-}
 
 
 class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
     def __init__(
         self,
         mdf,
-        name="",
         computation=None,
-        computed_signals=None,
         origin_uuid=None,
+        functions=None,
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.setupUi(self)
 
+        self.setWindowFlags(QtCore.Qt.WindowMinMaxButtonsHint | self.windowFlags())
+
         self.mdf = mdf
         self.result = None
         self.pressed_button = None
-        self.computed_signals = computed_signals or {}
         self.origin_uuid = origin_uuid or (mdf.uuid if mdf else os.urandom(6).hex())
 
-        self.operand1_float.setMaximum(np.inf)
-        self.operand1_float.setMinimum(-np.inf)
-        self.operand1_integer.setMaximum(2**31 - 1)
-        self.operand1_integer.setMinimum(-(2**31) + 1)
-
-        self.operand2_float.setMaximum(np.inf)
-        self.operand2_float.setMinimum(-np.inf)
-        self.operand2_integer.setMaximum(2**31 - 1)
-        self.operand2_integer.setMinimum(-(2**31) + 1)
-
-        self.first_function_argument.setMaximum(np.inf)
-        self.first_function_argument.setMinimum(-np.inf)
-        self.second_function_argument.setMaximum(np.inf)
-        self.second_function_argument.setMinimum(-np.inf)
+        self.arg_widgets = []
+        spacer = QtWidgets.QSpacerItem(
+            20, 20, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Expanding
+        )
+        self.arg_layout.addItem(spacer, len(self.arg_widgets) + 2, 0)
+        self.arg_widgets.append(spacer)
 
         for widget in (
             self.apply_btn,
             self.cancel_btn,
-            self.operand1_search_btn,
-            self.operand2_search_btn,
-            self.function_search_btn,
-            self.expression_search_btn,
         ):
             widget.setDefault(False)
             widget.setAutoDefault(False)
 
-        self.op.addItems(
-            [
-                "+ (add)",
-                "- (substract)",
-                "/ (divide)",
-                "// (floor divide)",
-                "* (multiply)",
-                "% (modulo)",
-                "** (power)",
-                "^ (xor)",
-                "& (and)",
-                "| (or)",
-                ">> (right shift)",
-                "<< (left shift)",
-            ]
-        )
+        self._functions = functions or {}
+        self.info = None
 
-        self.function.addItems(sorted(FUNCTIONS))
-        self.function.setCurrentIndex(-1)
+        self.functions.addItems(sorted(self._functions))
+        self.functions.setCurrentIndex(-1)
+        self.functions.currentTextChanged.connect(self.function_changed)
+        self.functions.currentIndexChanged.connect(self.function_changed)
 
         self.apply_btn.clicked.connect(self.apply)
         self.cancel_btn.clicked.connect(self.cancel)
+        self.show_definition_btn.clicked.connect(self.show_definition)
 
-        self.operand1_search_btn.clicked.connect(
-            partial(self.search, text_widget=self.operand1_name)
-        )
-        self.operand2_search_btn.clicked.connect(
-            partial(self.search, text_widget=self.operand2_name)
-        )
-        self.function_search_btn.clicked.connect(
-            partial(self.search, text_widget=self.function_channel)
-        )
-        self.expression_search_btn.clicked.connect(
-            partial(self.search, text_widget=self.expression)
-        )
+        self.trigger_search_btn.clicked.connect(self.search)
 
-        self.function.currentIndexChanged.connect(self.function_changed)
+        self.computation = computation
+        if computation:
 
-        if computation is None:
-
-            if name:
-                self.operand1_name.setText(name)
-                self.function_channel.setText(name)
-
-        else:
+            computation = computation_to_python_function(computation)
 
             self.name.setText(
                 computation.get("channel_name", computation.get("channel", ""))
@@ -172,92 +76,47 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
             self.unit.setText(computation.get("channel_unit", ""))
             self.comment.setPlainText(computation.get("channel_comment", ""))
 
-            if computation["type"] == "arithmetic":
-                if isinstance(computation["operand1"], str):
-                    self.operand1_as_signal.setChecked(True)
-                    if not isinstance(computation["operand1"], dict):
-                        self.operand1_name.setText(computation["operand1"])
-                elif isinstance(computation["operand1"], int):
-                    self.operand1_as_integer.setChecked(True)
-                    self.operand1_integer.setValue(computation["operand1"])
-                else:
-                    self.operand1_as_float.setChecked(True)
-                    self.operand1_float.setValue(computation["operand1"])
+            if computation["triggering"] == "triggering_on_all":
+                self.triggering_on_all.setChecked(True)
 
-                if isinstance(computation["operand2"], str):
-                    self.operand2_as_signal.setChecked(True)
-                    if not isinstance(computation["operand2"], dict):
-                        self.operand2_name.setText(computation["operand2"])
-                elif isinstance(computation["operand2"], int):
-                    self.operand2_as_integer.setChecked(True)
-                    self.operand2_integer.setValue(computation["operand2"])
-                else:
-                    self.operand2_as_float.setChecked(True)
-                    self.operand2_float.setValue(computation["operand2"])
+            elif computation["triggering"] == "triggering_on_channel":
+                self.triggering_on_channel.setChecked(True)
+                self.trigger_channel.setText(computation["triggering_value"])
 
-                self.op.setCurrentIndex(SHORT_OPS.index(computation["op"]))
+            elif computation["triggering"] == "triggering_on_interval":
+                self.triggering_on_interval.setChecked(True)
+                self.trigger_interval.setValue(float(computation["triggering_value"]))
 
-            elif computation["type"] == "function":
-                self.tabs.setCurrentIndex(1)
-                self.function.setCurrentText(computation["name"])
-                if not isinstance(computation["channel"], dict):
-                    self.function_channel.setText(computation["channel"])
+            if computation["function"] in self._functions:
+                self.functions.setCurrentText(computation["function"])
 
-                for arg, arg_value in zip(
-                    [self.first_function_argument, self.second_function_argument],
-                    computation["args"],
-                ):
-                    arg.setValue(arg_value)
+                for i, names in enumerate(computation["args"].values()):
+                    self.arg_widgets[i][1].insertPlainText("\n".join(names))
 
-            else:
-                self.tabs.setCurrentIndex(2)
-                self.expression.setPlainText(computation["expression"])
+        self.showMaximized()
 
-    def apply_simple_computation(self):
+    def apply(self):
 
-        if (
-            self.operand1_as_signal.isChecked()
-            and not self.operand1_name.text().strip()
-        ):
-            QtWidgets.QMessageBox.warning(
-                None, "Can't compute new channel", "Must select operand 1 first"
-            )
+        if not self.functions.currentIndex() >= 0:
             return
 
-        if (
-            self.operand2_as_signal.isChecked()
-            and not self.operand2_name.text().strip()
-        ):
-            QtWidgets.QMessageBox.warning(
-                None, "Can't compute new channel", "Must select operand 2 first"
-            )
-            return
+        name = self.name.text().strip() or f"Function_{os.urandom(6).hex()}"
 
-        if self.op.currentIndex() == -1:
-            QtWidgets.QMessageBox.warning(
-                None, "Can't compute new channel", "Must select operator"
-            )
-            return
-
-        if self.operand1_as_signal.isChecked():
-            operand1 = self.operand1_name.text().strip()
-            if operand1 in self.computed_signals:
-                operand1 = self.computed_signals[operand1].computation
-        elif self.operand1_as_integer.isChecked():
-            operand1 = self.opernad1_integer.value()
+        if self.triggering_on_all.isChecked():
+            triggering = "triggering_on_all"
+            triggering_value = "all"
+        elif self.triggering_on_interval.isChecked():
+            triggering = "triggering_on_interval"
+            triggering_value = self.trigger_interval.value()
         else:
-            operand1 = self.operand1_float.value()
+            triggering = "triggering_on_channel"
+            triggering_value = self.trigger_channel.text().strip()
 
-        if self.operand2_as_signal.isChecked():
-            operand2 = self.operand2_name.text().strip()
-            if operand2 in self.computed_signals:
-                operand2 = self.computed_signals[operand2].computation
-        elif self.operand2_as_integer.isChecked():
-            operand2 = self.operand2_integer.value()
-        else:
-            operand2 = self.operand2_float.value()
-
-        op = self.op.currentText().split(" ")[0]
+        fargs = {}
+        for i, (label, text_edit, button) in enumerate(self.arg_widgets[:-1]):
+            names = text_edit.toPlainText().splitlines()
+            names = [line.strip() for line in names if line.strip()]
+            fargs[label.text()] = names
 
         self.result = {
             "type": "channel",
@@ -268,87 +127,8 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
             "fmt": "{:.3f}",
             "format": "phys",
             "precision": 3,
+            "flags": Signal.Flags.no_flags,
             "ranges": [],
-            "y_range": [0, 1],
-            "unit": self.unit.text().strip(),
-            "computed": True,
-            "color": f"#{os.urandom(3).hex()}",
-            "origin_uuid": self.origin_uuid,
-            "uuid": os.urandom(6).hex(),
-            "group_index": -1,
-            "channel_index": -1,
-            "name": self.name.text().strip() or f"{operand1}_{op}_{operand2}",
-            "computation": {
-                "type": "arithmetic",
-                "op": op,
-                "operand1": operand1,
-                "operand2": operand2,
-                "channel_name": self.name.text().strip()
-                or f"{operand1}_{op}_{operand2}",
-                "channel_unit": self.unit.text().strip(),
-                "channel_comment": self.comment.toPlainText().strip(),
-            },
-        }
-
-        self.pressed_button = "apply"
-        self.close()
-
-    def function_changed(self, index):
-        function = self.function.currentText()
-        self.help.setText(getattr(np, function).__doc__)
-
-        args = ARGS_COUNT[function]
-        if args == 0:
-            self.first_function_argument.setEnabled(False)
-            self.second_function_argument.setEnabled(False)
-        elif args == 1:
-            self.first_function_argument.setEnabled(True)
-            self.second_function_argument.setEnabled(False)
-        else:
-            self.first_function_argument.setEnabled(True)
-            self.second_function_argument.setEnabled(True)
-
-    def apply_function(self):
-        if self.function.currentIndex() == -1:
-            QtWidgets.QMessageBox.warning(
-                None, "Can't compute new channel", "Must select a function first"
-            )
-            return
-
-        if not self.function_channel.text().strip():
-            QtWidgets.QMessageBox.warning(
-                None, "Can't compute new channel", "Must select a channel first"
-            )
-            return
-
-        function = self.function.currentText()
-        function_channel = self.function_channel.text().strip()
-
-        args_count = ARGS_COUNT[function]
-        if args_count == 0:
-            args = []
-        elif args_count == 1:
-            args = [self.first_function_argument.value()]
-        else:
-            args = [
-                self.first_function_argument.value(),
-                self.second_function_argument.value(),
-            ]
-
-        if function_channel in self.computed_signals:
-            function_channel = self.computed_signals[function_channel].computation
-
-        self.result = {
-            "type": "channel",
-            "common_axis": False,
-            "individual_axis": False,
-            "enabled": True,
-            "mode": "phys",
-            "fmt": "{:.3f}",
-            "format": "phys",
-            "precision": 3,
-            "ranges": [],
-            "y_range": [0, 1],
             "unit": self.unit.text().strip(),
             "computed": True,
             "color": f"#{os.urandom(3).hex()}",
@@ -356,60 +136,17 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
             "origin_uuid": self.origin_uuid,
             "group_index": -1,
             "channel_index": -1,
-            "name": self.name.text().strip() or f"{function}({function_channel})",
+            "name": name,
             "computation": {
-                "type": "function",
-                "channel": function_channel,
-                "name": function,
-                "args": args,
-                "channel_name": self.name.text().strip()
-                or f"{function}({function_channel})",
+                "args": fargs,
+                "type": "python_function",
+                "definition": "",
+                "channel_name": name,
+                "function": self.functions.currentText(),
                 "channel_unit": self.unit.text().strip(),
                 "channel_comment": self.comment.toPlainText().strip(),
-            },
-        }
-
-        self.pressed_button = "apply"
-        self.close()
-
-    def apply(self, event):
-        if self.tabs.currentIndex() == 0:
-            self.apply_simple_computation()
-        elif self.tabs.currentIndex() == 1:
-            self.apply_function()
-        else:
-            self.apply_expression()
-        self.close()
-
-    def apply_expression(self):
-        expression_string = self.expression.toPlainText().strip()
-        expression_string = "".join(expression_string.splitlines())
-
-        self.result = {
-            "type": "channel",
-            "common_axis": False,
-            "individual_axis": False,
-            "enabled": True,
-            "mode": "phys",
-            "fmt": "{:.3f}",
-            "format": "phys",
-            "precision": 3,
-            "ranges": [],
-            "y_range": [0, 1],
-            "unit": self.unit.text().strip(),
-            "computed": True,
-            "color": f"#{os.urandom(3).hex()}",
-            "uuid": os.urandom(6).hex(),
-            "origin_uuid": self.origin_uuid,
-            "group_index": -1,
-            "channel_index": -1,
-            "name": self.name.text().strip() or "expression",
-            "computation": {
-                "type": "expression",
-                "expression": expression_string,
-                "channel_name": self.name.text().strip() or "expression",
-                "channel_unit": self.unit.text().strip(),
-                "channel_comment": self.comment.toPlainText().strip(),
+                "triggering": triggering,
+                "triggering_value": triggering_value,
             },
         }
 
@@ -421,6 +158,64 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
         self.pressed_button = "cancel"
         self.close()
 
+    def function_changed(self, *args):
+        name = self.functions.currentText()
+        for widgets in self.arg_widgets[:-1]:
+            for widget in widgets:
+                self.arg_layout.removeWidget(widget)
+                widget.setParent(None)
+
+        self.arg_layout.removeItem(self.arg_widgets[-1])
+
+        self.arg_widgets.clear()
+
+        definition = self._functions[name]
+        exec(definition.replace("\t", "    "))
+        func = locals()[name]
+
+        icon = QtGui.QIcon()
+        icon.addPixmap(
+            QtGui.QPixmap(":/search.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
+        )
+
+        parameters = list(inspect.signature(func).parameters)[:-1]
+        for i, arg_name in enumerate(parameters, 2):
+            label = QtWidgets.QLabel(arg_name)
+            self.arg_layout.addWidget(label, i, 0)
+            text_edit = QtWidgets.QTextEdit()
+            self.arg_layout.addWidget(text_edit, i, 1)
+            button = QtWidgets.QPushButton("")
+            button.setIcon(icon)
+            button.clicked.connect(partial(self.search_argument, index=i - 2))
+            self.arg_layout.addWidget(button, i, 2)
+
+            self.arg_widgets.append((label, text_edit, button))
+
+        spacer = QtWidgets.QSpacerItem(
+            20, 20, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Expanding
+        )
+
+        self.arg_layout.addItem(spacer, len(self.arg_widgets) + 2, 0)
+        self.arg_widgets.append(spacer)
+
+    def search_argument(self, *args, index=0):
+        dlg = AdvancedSearch(
+            self.mdf,
+            show_add_window=False,
+            show_apply=True,
+            apply_text="Select channel",
+            show_pattern=False,
+            parent=self,
+            return_names=True,
+        )
+        dlg.setModal(True)
+        dlg.exec_()
+        result, pattern_window = dlg.result, dlg.pattern_window
+
+        if result:
+            lines = [self.arg_widgets[index][1].toPlainText(), *list(result)]
+            self.arg_widgets[index][1].setText("\n".join(lines))
+
     def search(self, *args, text_widget=None):
         dlg = AdvancedSearch(
             self.mdf,
@@ -430,16 +225,58 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
             show_pattern=False,
             parent=self,
             return_names=True,
-            computed_signals=self.computed_signals,
         )
         dlg.setModal(True)
         dlg.exec_()
         result, pattern_window = dlg.result, dlg.pattern_window
 
         if result:
-            text = list(result)[0]
+            self.trigger_channel.setText(list(result)[0])
 
-            if text_widget is self.expression:
-                text_widget.insertPlainText("{{" + text + "}}")
-            elif text_widget is not None:
-                text_widget.setText(text)
+    def show_definition(self, *args):
+        function = self.functions.currentText()
+        if function:
+            definition = self._functions[self.functions.currentText()]
+
+            # keep a reference otherwise the window gets closed
+            self.info = info = QtWidgets.QPlainTextEdit(definition)
+            PythonHighlighter(info.document())
+            info.setReadOnly(True)
+            info.setLineWrapMode(info.NoWrap)
+            info.setWindowFlags(QtCore.Qt.WindowMinMaxButtonsHint | info.windowFlags())
+            info.setWindowTitle(f"{function} definition")
+            info.setWindowModality(QtCore.Qt.ApplicationModal)
+
+            p = info.palette()
+            for active in (QtGui.QPalette.Active, QtGui.QPalette.Inactive):
+                p.setColor(active, QtGui.QPalette.Base, QtGui.QColor("#131314"))
+                p.setColor(active, QtGui.QPalette.WindowText, QtGui.QColor("#ffffff"))
+                p.setColor(active, QtGui.QPalette.Text, QtGui.QColor("#ffffff"))
+            info.setPalette(p)
+
+            icon = QtGui.QIcon()
+            icon.addPixmap(
+                QtGui.QPixmap(":/info.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
+            )
+            info.setWindowIcon(icon)
+
+            info.show()
+            rect = info.geometry()
+            rect.setWidth(600)
+            rect.setHeight(400)
+            info.setGeometry(rect)
+
+        else:
+            if self.computation:
+                function = self.computation["function"]
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    f"{function} definition missing",
+                    f"The function {function} was not found in the Functions manager",
+                )
+            else:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    f"No function selected",
+                    f"Please select one of the fucntion defined in the Functions manager",
+                )

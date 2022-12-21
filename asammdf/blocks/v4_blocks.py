@@ -43,6 +43,7 @@ from .utils import (
     block_fields,
     escape_xml_string,
     extract_display_names,
+    extract_ev_tool,
     FLOAT64_u,
     get_text_v4,
     is_file_like,
@@ -2361,6 +2362,7 @@ class ChannelConversion(_ChannelConversionBase):
 
     def __init__(self, **kwargs) -> None:
         self._cache = None
+        self.is_user_defined = False
 
         if "stream" in kwargs:
             stream = kwargs["stream"]
@@ -3425,7 +3427,6 @@ class ChannelConversion(_ChannelConversionBase):
                     ],
                 )
             else:
-
                 ret = np.full(values.size, None, "O")
 
                 idx1 = np.searchsorted(raw_vals, values, side="right") - 1
@@ -3478,10 +3479,10 @@ class ChannelConversion(_ChannelConversionBase):
                                 ret[idx_] = item.convert(values[idx_])
 
                 try:
-                    ret = ret.astype(bytes)
+                    ret = ret.astype("<f8")
                 except:
                     try:
-                        ret = ret.astype("<f8")
+                        ret = ret.astype(bytes)
                     except:
                         if not as_object:
                             ret = np.array(
@@ -4765,6 +4766,7 @@ class _EventBlockBase:
         "creator_index",
         "sync_base",
         "sync_factor",
+        "tool",
     )
 
 
@@ -4916,6 +4918,8 @@ class EventBlock(_EventBlockBase):
 
             if self.flags & v4c.FLAG_EV_GROUP_NAME:
                 self.group_name_addr = kwargs.get("group_name_addr", 0)
+
+        self.tool = extract_ev_tool(self.comment)
 
     def update_references(self, ch_map, cg_map):
         self.scopes.clear()
@@ -5206,6 +5210,9 @@ class FileHistory:
             self.time_flags = kwargs.get("time_flags", 2)
             self.reserved1 = kwargs.get("reserved1", b"\x00" * 3)
 
+            localtz = dateutil.tz.tzlocal()
+            self.time_stamp = datetime.fromtimestamp(time.time(), tz=localtz)
+
     def to_blocks(
         self, address: int, blocks: list[Any], defined_texts: dict[str, int]
     ) -> int:
@@ -5241,6 +5248,56 @@ class FileHistory:
             v4c.FMT_FILE_HISTORY, *[self[key] for key in v4c.KEYS_FILE_HISTORY]
         )
         return result
+
+    @property
+    def time_stamp(self) -> datetime:
+        """getter and setter the file history timestamp
+
+        Returns
+        -------
+        timestamp : datetime.datetime
+            start timestamp
+
+        """
+
+        timestamp = self.abs_time / 10**9
+        if self.time_flags & v4c.FLAG_HD_LOCAL_TIME:
+            tz = dateutil.tz.tzlocal()
+        else:
+            tz = timezone(timedelta(minutes=self.tz_offset + self.daylight_save_time))
+
+        try:
+            timestamp = datetime.fromtimestamp(timestamp, tz)
+
+        except OverflowError:
+            timestamp = datetime.fromtimestamp(0, tz) + timedelta(seconds=timestamp)
+
+        return timestamp
+
+    @time_stamp.setter
+    def time_stamp(self, timestamp: datetime) -> None:
+
+        if timestamp.tzinfo is None:
+            self.time_flags = v4c.FLAG_HD_LOCAL_TIME
+            self.abs_time = int(timestamp.timestamp() * 10**9)
+            self.tz_offset = 0
+            self.daylight_save_time = 0
+
+        else:
+            self.time_flags = v4c.FLAG_HD_TIME_OFFSET_VALID
+
+            tzinfo = timestamp.tzinfo
+
+            dst = tzinfo.dst(timestamp)
+            if dst is not None:
+                dst = int(tzinfo.dst(timestamp).total_seconds() / 60)
+            else:
+                dst = 0
+            tz_offset = int(tzinfo.utcoffset(timestamp).total_seconds() / 60) - dst
+
+            self.tz_offset = tz_offset
+            self.daylight_save_time = dst
+            self.abs_time = int(timestamp.timestamp() * 10**9)
 
 
 class HeaderBlock:
@@ -5349,7 +5406,8 @@ class HeaderBlock:
             self.start_angle = kwargs.get("start_angle", 0)
             self.start_distance = kwargs.get("start_distance", 0)
 
-            self.start_time = datetime(1980, 1, 1)
+            localtz = dateutil.tz.tzlocal()
+            self.start_time = datetime.fromtimestamp(time.time(), tz=localtz)
 
     @property
     def comment(self):
@@ -5462,8 +5520,7 @@ class HeaderBlock:
         if self.time_flags & v4c.FLAG_HD_LOCAL_TIME:
             tz = dateutil.tz.tzlocal()
         else:
-            tz = timezone.utc
-            timestamp += self.tz_offset * 60 + self.daylight_save_time * 60
+            tz = timezone(timedelta(minutes=self.tz_offset + self.daylight_save_time))
 
         try:
             timestamp = datetime.fromtimestamp(timestamp, tz)
@@ -5507,6 +5564,9 @@ class HeaderBlock:
             dst_offset_sign = "-" if dst_offset < 0 else "+"
 
             tz_information = f"[GMT{tz_offset_sign}{tz_offset:.2f} DST{dst_offset_sign}{dst_offset:.2f}h]"
+
+            start_time = f'local time = {self.start_time.strftime("%d-%b-%Y %H:%M:%S + %fu")} {tz_information}'
+
         else:
             tzinfo = self.start_time.tzinfo
 
@@ -5515,6 +5575,7 @@ class HeaderBlock:
                 dst = int(tzinfo.dst(self.start_time).total_seconds() / 3600)
             else:
                 dst = 0
+
             tz_offset = (
                 int(tzinfo.utcoffset(self.start_time).total_seconds() / 3600) - dst
             )
@@ -5526,7 +5587,8 @@ class HeaderBlock:
 
             tz_information = f"[assumed GMT{tz_offset_sign}{tz_offset:.2f} DST{dst_offset_sign}{dst_offset:.2f}h]"
 
-        start_time = f'local time = {self.start_time.strftime("%d-%b-%Y %H:%M:%S + %fu")} {tz_information}'
+            start_time = f'local time = {self.start_time.strftime("%d-%b-%Y %H:%M:%S + %fu")} {tz_information}'
+
         return start_time
 
     def to_blocks(self, address: int, blocks: list[Any]) -> int:

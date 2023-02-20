@@ -15,7 +15,7 @@ with (PROJECT_PATH / "requirements.txt").open() as f:
 
 
 def _get_version():
-    with PROJECT_PATH.joinpath("asammdf", "version.py").open() as f:
+    with PROJECT_PATH.joinpath("src", "asammdf", "version.py").open() as f:
         line = next(line for line in f if line.startswith("__version__"))
 
     version = line.partition("=")[2].strip()[1:-1]
@@ -33,7 +33,7 @@ def _get_ext_modules():
     modules = [
         Extension(
             "asammdf.blocks.cutils",
-            ["asammdf/blocks/cutils.c"],
+            ["src/asammdf/blocks/cutils.c"],
             include_dirs=[get_include()],
         )
     ]
@@ -77,11 +77,14 @@ setup(
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
     ],
+    # Supported python versions
+    python_requires=">=3.8",
     # What does your project relate to?
     keywords="read reader edit editor parse parser asam mdf measurement",
     # You can just specify the packages manually here if your project is
     # simple. Or you can use find_packages().
-    packages=find_packages(include=("asammdf*",)),
+    packages=find_packages("src"),
+    package_dir={"": "src"},
     # Alternatively, if you want to distribute just a my_module.py, uncomment
     # this:
     #   py_modules=["my_module"],
@@ -100,9 +103,9 @@ setup(
             "fastparquet",
             "h5py",
             "hdf5storage>=0.1.17",
-            "scipy",
             "python-snappy",
         ],
+        "export_matlab_v5": "scipy",
         "gui": [
             "lxml",
             "natsort",
@@ -110,15 +113,15 @@ setup(
             "PySide6",
             "pyqtgraph>=0.12.4",
             "pyqtlet2>=0.8.0",
-            "scipy<1.8.0",
         ],
         "encryption": ["cryptography", "keyring"],
         "symbolic_math": "numexpr3",
+        "filesystem": "fsspec",
     },
     # If there are data files included in your packages that need to be
     # installed, specify them here.  If using Python 2.6 or less, then these
     # have to be included in MANIFEST.in as well.
-    package_data={"asammdf": ["asammdf/gui/ui/*.ui"]},
+    package_data={"asammdf.gui.ui": ["*.ui"]},
     include_package_data=True,
     # Although 'package_data' is the preferred approach, in some case you may
     # need to place data files outside of your packages. See:

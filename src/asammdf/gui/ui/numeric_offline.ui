@@ -1,0 +1,248 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>NumericDisplay</class>
+ <widget class="QWidget" name="NumericDisplay">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>681</width>
+    <height>666</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Form</string>
+  </property>
+  <layout class="QVBoxLayout" name="main_layout">
+   <item>
+    <layout class="QGridLayout" name="gridLayout_2" columnstretch="0,0,1,0">
+     <item row="0" column="3">
+      <widget class="QPushButton" name="toggle_controls_btn">
+       <property name="text">
+        <string>Show controls</string>
+       </property>
+       <property name="icon">
+        <iconset resource="resource.qrc">
+         <normaloff>:/down.png</normaloff>:/down.png</iconset>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="0">
+      <widget class="QLabel" name="label_5">
+       <property name="text">
+        <string>Float precision</string>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="1">
+      <widget class="QComboBox" name="float_precision"/>
+     </item>
+     <item row="0" column="2">
+      <spacer name="horizontalSpacer">
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+       <property name="sizeHint" stdset="0">
+        <size>
+         <width>40</width>
+         <height>20</height>
+        </size>
+       </property>
+      </spacer>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="time_group">
+     <property name="title">
+      <string>Time stamp</string>
+     </property>
+     <layout class="QHBoxLayout" name="horizontalLayout_2">
+      <item>
+       <layout class="QHBoxLayout" name="horizontalLayout" stretch="0,0,1,0">
+        <item>
+         <widget class="QDoubleSpinBox" name="timestamp">
+          <property name="suffix">
+           <string>s</string>
+          </property>
+          <property name="decimals">
+           <number>9</number>
+          </property>
+          <property name="singleStep">
+           <double>0.001000000000000</double>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLabel" name="min_t">
+          <property name="text">
+           <string/>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QSlider" name="timestamp_slider">
+          <property name="maximum">
+           <number>99999</number>
+          </property>
+          <property name="orientation">
+           <enum>Qt::Horizontal</enum>
+          </property>
+          <property name="invertedAppearance">
+           <bool>false</bool>
+          </property>
+          <property name="invertedControls">
+           <bool>false</bool>
+          </property>
+          <property name="tickPosition">
+           <enum>QSlider::NoTicks</enum>
+          </property>
+          <property name="tickInterval">
+           <number>1</number>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLabel" name="max_t">
+          <property name="text">
+           <string/>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="search_group">
+     <property name="title">
+      <string>Search for values</string>
+     </property>
+     <layout class="QGridLayout" name="gridLayout" columnstretch="0,1,0,0">
+      <item row="0" column="1">
+       <widget class="QLineEdit" name="pattern_match">
+        <property name="placeholderText">
+         <string>pattern</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="2">
+       <widget class="QComboBox" name="op">
+        <item>
+         <property name="text">
+          <string>==</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>!=</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>&lt;</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>&lt;=</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>&gt;</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>&gt;=</string>
+         </property>
+        </item>
+       </widget>
+      </item>
+      <item row="0" column="3">
+       <widget class="QLineEdit" name="target">
+        <property name="placeholderText">
+         <string>target value</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="3">
+       <layout class="QHBoxLayout" name="horizontalLayout_3">
+        <item>
+         <widget class="QPushButton" name="backward">
+          <property name="text">
+           <string/>
+          </property>
+          <property name="icon">
+           <iconset resource="resource.qrc">
+            <normaloff>:/right.png</normaloff>:/right.png</iconset>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <spacer name="horizontalSpacer_4">
+          <property name="orientation">
+           <enum>Qt::Horizontal</enum>
+          </property>
+          <property name="sizeHint" stdset="0">
+           <size>
+            <width>40</width>
+            <height>20</height>
+           </size>
+          </property>
+         </spacer>
+        </item>
+        <item>
+         <widget class="QPushButton" name="forward">
+          <property name="text">
+           <string/>
+          </property>
+          <property name="icon">
+           <iconset resource="resource.qrc">
+            <normaloff>:/left.png</normaloff>:/left.png</iconset>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item row="0" column="0">
+       <widget class="QComboBox" name="match_mode">
+        <item>
+         <property name="text">
+          <string>Raw</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Scaled</string>
+         </property>
+        </item>
+       </widget>
+      </item>
+      <item row="1" column="0" colspan="2">
+       <widget class="QLabel" name="match">
+        <property name="text">
+         <string/>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <tabstops>
+  <tabstop>timestamp</tabstop>
+  <tabstop>pattern_match</tabstop>
+  <tabstop>op</tabstop>
+  <tabstop>target</tabstop>
+  <tabstop>backward</tabstop>
+  <tabstop>forward</tabstop>
+ </tabstops>
+ <resources>
+  <include location="resource.qrc"/>
+ </resources>
+ <connections/>
+</ui>

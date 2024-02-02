@@ -1,22 +1,15 @@
-# -*- coding: utf-8 -*-
-import datetime
 import logging
-from traceback import format_exc
 
 import dateutil.tz
 import numpy as np
 import numpy.core.defchararray as npchar
 import pandas as pd
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from ...blocks.utils import (
     csv_bytearray2hex,
-    csv_int2bin,
-    csv_int2hex,
-    pandas_query_compatible,
 )
-from .tabular_base import TabularBase, TabularTreeItem
-from .tabular_filter import TabularFilter
+from .tabular_base import TabularBase
 
 logger = logging.getLogger("asammdf.gui")
 LOCAL_TIMEZONE = dateutil.tz.tzlocal()
@@ -25,9 +18,7 @@ LOCAL_TIMEZONE = dateutil.tz.tzlocal()
 class Tabular(TabularBase):
     add_channels_request = QtCore.Signal(list)
 
-    def __init__(
-        self, signals=None, start=None, format="phys", ranges=None, *args, **kwargs
-    ):
+    def __init__(self, signals=None, start=None, format="phys", ranges=None, *args, **kwargs):
         # super().__init__(*args, **kwargs)
 
         self.signals_descr = {}
@@ -50,12 +41,11 @@ class Tabular(TabularBase):
 
             for name_ in signals.columns:
                 col = signals[name_]
+
                 if col.dtype.kind == "O":
                     if name_.endswith("DataBytes"):
                         try:
-                            sizes = signals[
-                                name_.replace("DataBytes", "DataLength")
-                            ].astype("u2")
+                            sizes = signals[name_.replace("DataBytes", "DataLength")].astype("u2")
                         except:
                             sizes = None
                         dropped[name_] = pd.Series(
@@ -68,9 +58,7 @@ class Tabular(TabularBase):
 
                     elif name_.endswith("Data Bytes"):
                         try:
-                            sizes = signals[
-                                name_.replace("Data Bytes", "Data Length")
-                            ].astype("u2")
+                            sizes = signals[name_.replace("Data Bytes", "Data Length")].astype("u2")
                         except:
                             sizes = None
                         dropped[name_] = pd.Series(
@@ -82,24 +70,19 @@ class Tabular(TabularBase):
                         )
 
                     elif col.dtype.name != "category":
-                        try:
-                            dropped[name_] = pd.Series(
-                                csv_bytearray2hex(col), index=signals.index
-                            )
-                        except:
-                            pass
+                        if len(col) and col.dtype.kind == "u" and col.dtype.itemsize == 1:
+                            try:
+                                dropped[name_] = pd.Series(csv_bytearray2hex(col), index=signals.index)
+                            except:
+                                pass
 
                     self.signals_descr[name_] = 0
 
                 elif col.dtype.kind == "S":
                     try:
-                        dropped[name_] = pd.Series(
-                            npchar.decode(col, "utf-8"), index=signals.index
-                        )
+                        dropped[name_] = pd.Series(npchar.decode(col, "utf-8"), index=signals.index)
                     except:
-                        dropped[name_] = pd.Series(
-                            npchar.decode(col, "latin-1"), index=signals.index
-                        )
+                        dropped[name_] = pd.Series(npchar.decode(col, "latin-1"), index=signals.index)
                     self.signals_descr[name_] = 0
                 else:
                     self.signals_descr[name_] = 0
@@ -112,12 +95,9 @@ class Tabular(TabularBase):
             names = [
                 "timestamps",
                 *[name for name in names if name.endswith((".ID", ".DataBytes"))],
-                *[
-                    name
-                    for name in names
-                    if name != "timestamps" and not name.endswith((".ID", ".DataBytes"))
-                ],
+                *[name for name in names if name != "timestamps" and not name.endswith((".ID", ".DataBytes"))],
             ]
+
             signals = signals[names]
 
         super().__init__(signals, ranges)
@@ -145,7 +125,7 @@ class Tabular(TabularBase):
         self.prefix.currentIndexChanged.connect(self.prefix_changed)
 
         if prefixes:
-            self.remove_prefix.setCheckState(QtCore.Qt.Checked)
+            self.remove_prefix.setCheckState(QtCore.Qt.CheckState.Checked)
 
         self._settings = QtCore.QSettings()
         integer_mode = self._settings.value("tabular_format", "phys")
@@ -153,6 +133,6 @@ class Tabular(TabularBase):
         self.format_selection.setCurrentText(integer_mode)
 
         self.tree.dataView.setAcceptDrops(True)
-        self.tree.dataView.setDragDropMode(QtWidgets.QAbstractItemView.InternalMove)
+        self.tree.dataView.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
         self.tree.dataView.setDropIndicatorShown(True)
-        self.tree.dataView.setDefaultDropAction(QtCore.Qt.MoveAction)
+        self.tree.dataView.setDefaultDropAction(QtCore.Qt.DropAction.MoveAction)

@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
 """ MDF v2 and v3 constants """
+
 import struct
 
 # byte order
@@ -297,7 +297,7 @@ KEYS_CHANNEL_SHORT = (
     "max_raw_value",
     "sampling_rate",
 )
-KEYS_CHANNEL_LONGNAME = KEYS_CHANNEL_SHORT + ("long_name_addr",)
+KEYS_CHANNEL_LONGNAME = (*KEYS_CHANNEL_SHORT, "long_name_addr")
 
 FMT_CHANNEL_GROUP = "<2sH3I3HI"
 KEYS_CHANNEL_GROUP = (

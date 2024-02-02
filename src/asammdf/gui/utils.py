@@ -1,37 +1,30 @@
-# -*- coding: utf-8 -*-
-from collections import defaultdict
-from copy import deepcopy
+import ctypes
 from datetime import datetime
 from functools import reduce
 import inspect
 from io import StringIO
-import json
 import math
 import os
-from pathlib import Path
+import random
 import re
 import sys
-from textwrap import dedent, indent
+from textwrap import indent
 from threading import Thread
-from time import perf_counter, sleep
+from time import sleep
 import traceback
 from traceback import format_exc
+from typing import Dict, Union
 
-import lxml
-import natsort
-from numexpr import evaluate
 import numpy as np
 import pandas as pd
 from pyqtgraph import functions as fn
 from PySide6 import QtCore, QtGui, QtWidgets
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
+from PySide6.QtCore import QThreadPool
 
-from ..blocks import v4_constants as v4c
-from ..blocks.conversion_utils import from_dict
 from ..blocks.options import FloatInterpolation, IntegerInterpolation
-from ..mdf import MDF, MDF2, MDF3, MDF4
 from ..signal import Signal
 from .dialogs.error_dialog import ErrorDialog
+from .dialogs.messagebox import MessageBox
 
 ERROR_ICON = None
 RANGE_INDICATOR_ICON = None
@@ -53,6 +46,9 @@ COLORS = [
     "#17becf",
 ]
 COLORS_COUNT = len(COLORS)
+
+GREEN = "#599e5e"
+BLUE = "#61b2e2"
 
 SCROLLBAR_STYLE = """
 QTreeWidget {{ font-size: {font_size}pt; }}
@@ -175,433 +171,12 @@ def excepthook(exc_type, exc_value, tracebackobj):
     msg = "\n".join(sections)
 
     print("".join(traceback.format_tb(tracebackobj)))
-    print("{0}: {1}".format(exc_type, exc_value))
+    print(f"{exc_type}: {exc_value}")
 
-    ErrorDialog(
-        message=errmsg, trace=msg, title="The following error was triggered"
-    ).exec_()
+    ErrorDialog(message=errmsg, trace=msg, title="The following error was triggered").exec_()
 
 
-def extract_mime_names(data):
-    def fix_comparison_name(data):
-        for item in data:
-            if item["type"] == "channel":
-                if (item["group_index"], item["channel_index"]) != (-1, -1):
-                    name = COMPARISON_NAME.match(item["name"]).group("name").strip()
-                    item["name"] = name
-            else:
-                fix_comparison_name(item["channels"])
-
-    names = []
-    if data.hasFormat("application/octet-stream-asammdf"):
-        data = bytes(data.data("application/octet-stream-asammdf")).decode("utf-8")
-        data = json.loads(data)
-        fix_comparison_name(data)
-        names = data
-
-    return names
-
-
-def load_dsp(file, background="#000000", flat=False):
-    if isinstance(background, str):
-        background = fn.mkColor(background)
-
-    def parse_conversions(display):
-        conversions = {}
-
-        if display is None:
-            return conversions
-
-        for item in display.findall("COMPU_METHOD"):
-            try:
-                conv = {
-                    "name": item.get("name"),
-                    "comment": item.get("description"),
-                    "unit": item.get("unit"),
-                }
-
-                conversion_type = int(item.get("cnv_type"))
-                if conversion_type == 0:
-                    conv["conversion_type"] = v4c.CONVERSION_TYPE_LIN
-
-                    coeffs = item.find("COEFFS_LINIAR")
-
-                    conv["a"] = float(coeffs.get("P1"))
-                    conv["b"] = float(coeffs.get("P2"))
-
-                elif conversion_type == 9:
-                    conv["conversion_type"] = v4c.CONVERSION_TYPE_RAT
-
-                    coeffs = item.find("COEFFS")
-                    for i in range(1, 7):
-                        conv[f"P{i}"] = float(coeffs.get(f"P{i}"))
-
-                elif conversion_type == 11:
-                    conv["conversion_type"] = v4c.CONVERSION_TYPE_TABX
-                    vtab = item.find("COMPU_VTAB")
-
-                    if vtab is not None:
-                        for i, item in enumerate(vtab.findall("tab")):
-                            conv[f"val_{i}"] = float(item.get("min"))
-                            text = item.get("text")
-                            if isinstance(text, bytes):
-                                text = text.decode("utf-8", errors="replace")
-                            conv[f"text_{i}"] = text
-
-                elif conversion_type == 12:
-                    conv["conversion_type"] = v4c.CONVERSION_TYPE_RTABX
-                    vtab = item.find("COMPU_VTAB_RANGE")
-
-                    if vtab is not None:
-                        text = vtab.get("default")
-                        if isinstance(text, bytes):
-                            text = text.decode("utf-8", errors="replace")
-                        conv["default_addr"] = vtab.get("default")
-                        for i, item in enumerate(vtab.findall("tab_range")):
-                            conv[f"upper_{i}"] = float(item.get("max"))
-                            conv[f"lower_{i}"] = float(item.get("min"))
-                            text = item.get("text")
-                            if isinstance(text, bytes):
-                                text = text.decode("utf-8", errors="replace")
-                            conv[f"text_{i}"] = text
-                else:
-                    continue
-
-                conversions[conv["name"]] = conv
-
-            except:
-                print(format_exc())
-                continue
-
-        return conversions
-
-    def parse_channels(display, conversions):
-        channels = []
-        for elem in display.iterchildren():
-            if elem.tag == "CHANNEL":
-                channel_name = elem.get("name")
-
-                comment = elem.find("COMMENT")
-                if comment is not None:
-                    comment = elem.get("text")
-                else:
-                    comment = ""
-
-                color_ = int(elem.get("color"))
-                c = 0
-                for i in range(3):
-                    c = c << 8
-                    c += color_ & 0xFF
-                    color_ = color_ >> 8
-
-                if c in (0xFFFFFF, 0x0):
-                    c = 0x808080
-
-                gain = float(elem.get("gain"))
-                offset = float(elem.get("offset")) / 100
-
-                multi_color = elem.find("MULTI_COLOR")
-
-                ranges = []
-
-                if multi_color is not None:
-                    for color in multi_color.findall("color"):
-                        min_ = float(color.find("min").get("data"))
-                        max_ = float(color.find("max").get("data"))
-                        color_ = int(color.find("color").get("data"))
-                        c = 0
-                        for i in range(3):
-                            c = c << 8
-                            c += color_ & 0xFF
-                            color_ = color_ >> 8
-                        color = fn.mkColor(f"#{c:06X}")
-                        ranges.append(
-                            {
-                                "background_color": background,
-                                "font_color": color,
-                                "op1": "<=",
-                                "op2": "<=",
-                                "value1": min_,
-                                "value2": max_,
-                            }
-                        )
-
-                chan = {
-                    "color": f"#{c:06X}",
-                    "common_axis": False,
-                    "computed": False,
-                    "flags": 0,
-                    "comment": comment,
-                    "enabled": elem.get("on") == "1",
-                    "fmt": "{}",
-                    "individual_axis": False,
-                    "name": channel_name,
-                    "mode": "phys",
-                    "precision": 3,
-                    "ranges": ranges,
-                    "unit": "",
-                    "type": "channel",
-                    "y_range": [
-                        -gain * offset,
-                        -gain * offset + 19 * gain,
-                    ],
-                    "origin_uuid": "000000000000",
-                }
-
-                conv_name = elem.get("cnv_name")
-                if conv_name in conversions:
-                    chan["conversion"] = deepcopy(conversions[conv_name])
-
-                channels.append(chan)
-
-            elif elem.tag.startswith("GROUP"):
-                channels.append(
-                    {
-                        "name": elem.get("data"),
-                        "enabled": elem.get("on") == "1",
-                        "type": "group",
-                        "channels": parse_channels(elem, conversions=conversions),
-                        "pattern": None,
-                        "origin_uuid": "000000000000",
-                        "ranges": [],
-                    }
-                )
-
-            elif elem.tag == "CHANNEL_PATTERN":
-                try:
-                    filter_type = elem.get("filter_type")
-                    if filter_type == "None":
-                        filter_type = "Unspecified"
-                    info = {
-                        "pattern": elem.get("name_pattern"),
-                        "name": elem.get("name_pattern"),
-                        "match_type": "Wildcard",
-                        "filter_type": filter_type,
-                        "filter_value": float(elem.get("filter_value")),
-                        "raw": bool(int(elem.get("filter_use_raw"))),
-                    }
-
-                    multi_color = elem.find("MULTI_COLOR")
-
-                    ranges = []
-
-                    if multi_color is not None:
-                        for color in multi_color.findall("color"):
-                            min_ = float(color.find("min").get("data"))
-                            max_ = float(color.find("max").get("data"))
-                            color_ = int(color.find("color").get("data"))
-                            c = 0
-                            for i in range(3):
-                                c = c << 8
-                                c += color_ & 0xFF
-                                color_ = color_ >> 8
-                            color = fn.mkColor(f"#{c:06X}")
-                            ranges.append(
-                                {
-                                    "background_color": background,
-                                    "font_color": color,
-                                    "op1": "<=",
-                                    "op2": "<=",
-                                    "value1": min_,
-                                    "value2": max_,
-                                }
-                            )
-
-                    info["ranges"] = ranges
-
-                    channels.append(
-                        {
-                            "channels": [],
-                            "enabled": True,
-                            "name": info["pattern"],
-                            "pattern": info,
-                            "type": "group",
-                            "ranges": [],
-                            "origin_uuid": "000000000000",
-                        }
-                    )
-
-                except:
-                    print(format_exc())
-                    continue
-
-        return channels
-
-    def parse_virtual_channels(display):
-        channels = {}
-
-        if display is None:
-            return channels
-
-        for item in display.findall("V_CHAN"):
-            try:
-                virtual_channel = {}
-
-                parent = item.find("VIR_TIME_CHAN")
-                vtab = item.find("COMPU_VTAB")
-                if parent is None or vtab is None:
-                    continue
-
-                name = item.get("name")
-
-                virtual_channel["name"] = name
-                virtual_channel["parent"] = parent.get("data")
-                virtual_channel["comment"] = item.find("description").get("data")
-
-                conv = {}
-                for i, item in enumerate(vtab.findall("tab")):
-                    conv[f"val_{i}"] = float(item.get("min"))
-                    text = item.get("text")
-                    if isinstance(text, bytes):
-                        text = text.decode("utf-8", errors="replace")
-                    conv[f"text_{i}"] = text
-
-                virtual_channel["vtab"] = conv
-
-                channels[name] = virtual_channel
-            except:
-                continue
-
-        return channels
-
-    def parse_c_functions(display):
-        c_functions = set()
-
-        if display is None:
-            return c_functions
-
-        for item in display.findall("CALC_FUNC"):
-            string = item.text
-
-            for match in C_FUNCTION.finditer(string):
-                c_functions.add(match.group("function"))
-
-        return natsort.natsorted(c_functions)
-
-    dsp = Path(file).read_bytes().replace(b"\0", b"")
-    dsp = lxml.etree.fromstring(dsp)
-
-    conversions = parse_conversions(dsp.find("COMPU_METHODS"))
-
-    channels = parse_channels(dsp.find("DISPLAY_INFO"), conversions)
-    c_functions = parse_c_functions(dsp)
-
-    functions = {}
-    virtual_channels = []
-
-    for i, ch in enumerate(
-        parse_virtual_channels(dsp.find("VIRTUAL_CHANNEL")).values()
-    ):
-        virtual_channels.append(
-            {
-                "color": COLORS[i % len(COLORS)],
-                "common_axis": False,
-                "computed": True,
-                "computation": {
-                    "args": {"arg1": []},
-                    "type": "python_function",
-                    "channel_comment": ch["comment"],
-                    "channel_name": ch["name"],
-                    "channel_unit": "",
-                    "function": f"f_{ch['name']}",
-                    "triggering": "triggering_on_all",
-                    "triggering_value": "all",
-                },
-                "flags": int(
-                    Signal.Flags.computed | Signal.Flags.user_defined_conversion
-                ),
-                "enabled": True,
-                "fmt": "{}",
-                "individual_axis": False,
-                "name": ch["parent"],
-                "precision": 3,
-                "ranges": [],
-                "unit": "",
-                "conversion": ch["vtab"],
-                "user_defined_name": ch["name"],
-                "comment": f"Datalyser virtual channel: {ch['comment']}",
-                "origin_uuid": "000000000000",
-                "type": "channel",
-            }
-        )
-
-        functions[
-            f"f_{ch['name']}"
-        ] = f"def f_{ch['name']}(arg1=0, t=0):\n    return arg1"
-
-    if virtual_channels:
-        channels.append(
-            {
-                "name": "Datalyser Virtual Channels",
-                "enabled": False,
-                "type": "group",
-                "channels": virtual_channels,
-                "pattern": None,
-                "origin_uuid": "000000000000",
-                "ranges": [],
-            }
-        )
-
-    info = {
-        "selected_channels": [],
-        "windows": [],
-        "has_virtual_channels": bool(virtual_channels),
-        "c_functions": c_functions,
-        "functions": functions,
-    }
-
-    if flat:
-        info = flatten_dsp(channels)
-    else:
-        plot = {
-            "type": "Plot",
-            "title": "Display channels",
-            "maximized": True,
-            "configuration": {
-                "channels": channels,
-                "locked": True,
-            },
-        }
-
-        info["windows"].append(plot)
-
-    return info
-
-
-def flatten_dsp(channels):
-    res = []
-
-    for item in channels:
-        if item["type"] == "group":
-            res.extend(flatten_dsp(item["channels"]))
-        else:
-            res.append(item["name"])
-
-    return res
-
-
-def load_lab(file):
-    sections = {}
-    with open(file, "r") as lab:
-        for line in lab:
-            line = line.strip()
-            if not line:
-                continue
-
-            if line.startswith("[") and line.endswith("]"):
-                section_name = line.strip("[]")
-                s = []
-                sections[section_name] = s
-
-            else:
-                s.append(line)
-
-    return {name: channels for name, channels in sections.items() if channels}
-
-
-def run_thread_with_progress(
-    widget, target, kwargs, factor=100, offset=0, progress=None
-):
+def run_thread_with_progress(widget, target, kwargs, factor=100, offset=0, progress=None):
     termination_request = False
 
     thr = WorkerThread(target=target, kwargs=kwargs)
@@ -609,25 +184,25 @@ def run_thread_with_progress(
     thr.start()
 
     while widget.progress is None and thr.is_alive():
-        sleep(0.1)
+        sleep(0.02)
 
     while thr.is_alive():
-        if not progress.wasCanceled():
+        if progress and not progress.wasCanceled():
             if widget.progress is not None:
                 if widget.progress != (0, 0):
-                    progress.setValue(
-                        int(widget.progress[0] / widget.progress[1] * factor) + offset
-                    )
+                    progress.setValue(int(widget.progress[0] / widget.progress[1] * factor) + offset)
                 else:
                     progress.setRange(0, 0)
         QtCore.QCoreApplication.processEvents()
         sleep(0.1)
 
-    progress.setValue(factor + offset)
+    if progress:
+        progress.setValue(factor + offset)
 
     if thr.error:
         widget.progress = None
-        progress.cancel()
+        if progress:
+            progress.cancel()
         raise Exception(thr.error)
 
     widget.progress = None
@@ -680,7 +255,7 @@ class Worker(QtCore.QRunnable):
 
 
 class ProgressDialog(QtWidgets.QProgressDialog):
-    finished = QtCore.Signal()
+    qfinished = QtCore.Signal()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -689,6 +264,8 @@ class ProgressDialog(QtWidgets.QProgressDialog):
         self.error = None
         self.result = None
         self.thread_finished = True
+        # Connect signal to "processEvents": Give the chance to "destroy" function to make his job
+        self.qfinished.connect(lambda: QtCore.QCoreApplication.processEvents())
 
     def run_thread_with_progress(self, target, args, kwargs):
         self.show()
@@ -722,21 +299,24 @@ class ProgressDialog(QtWidgets.QProgressDialog):
         self.error = error
 
     def thread_complete(self):
-        self.finished.emit()
         self.thread_finished = True
         super().close()
+        self.qfinished.emit()
+
+    def cancel(self):
+        super().cancel()
+        self.destroy()
 
     def close(self):
         while not self.thread_finished:
             self.worker.stop = True
             sleep(0.01)
             QtCore.QCoreApplication.processEvents()
+        self.destroy()
 
     def keyPressEvent(self, event):
-        if (
-            event.key() == QtCore.Qt.Key_Escape
-            and event.modifiers() == QtCore.Qt.NoModifier
-        ):
+        if event.key() == QtCore.Qt.Key.Key_Escape and event.modifiers() == QtCore.Qt.KeyboardModifier.NoModifier:
+            event.accept()
             self.close()
         else:
             super().keyPressEvent(event)
@@ -745,14 +325,12 @@ class ProgressDialog(QtWidgets.QProgressDialog):
 def setup_progress(parent, title="", message="", icon_name="", autoclose=False):
     progress = ProgressDialog(message, "Cancel", 0, 100, parent)
 
-    progress.setWindowModality(QtCore.Qt.ApplicationModal)
+    progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
     progress.setCancelButton(None)
     progress.setAutoClose(autoclose)
     progress.setWindowTitle(title)
     icon = QtGui.QIcon()
-    icon.addPixmap(
-        QtGui.QPixmap(f":/{icon_name}.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-    )
+    icon.addPixmap(QtGui.QPixmap(f":/{icon_name}.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
     progress.setWindowIcon(icon)
     progress.setMinimumWidth(600)
 
@@ -781,12 +359,16 @@ def get_data_function(signals, fill_0_for_missing_computation_channels):
                 signals[name]
                 .interp(
                     [t],
-                    integer_interpolation_mode=IntegerInterpolation.REPEAT_PREVIOUS_SAMPLE
-                    if not interpolated
-                    else IntegerInterpolation.LINEAR_INTERPOLATION,
-                    float_interpolation_mode=FloatInterpolation.REPEAT_PREVIOUS_SAMPLE
-                    if not interpolated
-                    else FloatInterpolation.LINEAR_INTERPOLATION,
+                    integer_interpolation_mode=(
+                        IntegerInterpolation.REPEAT_PREVIOUS_SAMPLE
+                        if not interpolated
+                        else IntegerInterpolation.LINEAR_INTERPOLATION
+                    ),
+                    float_interpolation_mode=(
+                        FloatInterpolation.REPEAT_PREVIOUS_SAMPLE
+                        if not interpolated
+                        else FloatInterpolation.LINEAR_INTERPOLATION
+                    ),
                 )
                 .samples
             )
@@ -810,6 +392,16 @@ def compute_signal(
     all_timebase,
     functions,
 ):
+    required_channels = {}
+    for key, sig in measured_signals.items():
+        signal = sig.physical(copy=False)
+        if signal.samples.dtype.kind in "fui":
+            required_channels[key] = signal
+        else:
+            required_channels[key] = sig
+
+    measured_signals = required_channels
+
     type_ = description["type"]
 
     try:
@@ -843,18 +435,41 @@ def compute_signal(
                         signals.append(measured_signals[name])
                         found_args.append(arg)
                         break
+                    else:
+                        found_numeric = False
+                        for base in (10, 16, 2):
+                            try:
+                                value = int(name, base)
+                                signals.append(value)
+                                found_args.append(arg)
+                                found_numeric = True
+                                break
+                            except:
+                                continue
 
-            names = found_args + ["t"]
+                        else:
+                            try:
+                                value = float(name)
+                                signals.append(value)
+                                found_args.append(arg)
+                                found_numeric = True
+                            except:
+                                continue
+
+                        if found_numeric:
+                            break
+
+            names = [*found_args, "t"]
 
             triggering = description.get("triggering", "triggering_on_all")
             if triggering == "triggering_on_all":
-                timestamps = [sig.timestamps for sig in signals]
+                timestamps = [sig.timestamps for sig in signals if not isinstance(sig, (int, float))]
 
                 if timestamps:
                     common_timebase = reduce(np.union1d, timestamps)
                 else:
                     common_timebase = all_timebase
-                signals = [sig.interp(common_timebase) for sig in signals]
+                signals = [sig.interp(common_timebase) if not isinstance(sig, (int, float)) else sig for sig in signals]
 
             elif triggering == "triggering_on_channel":
                 triggering_channel = description["triggering_value"]
@@ -863,12 +478,15 @@ def compute_signal(
                     common_timebase = measured_signals[triggering_channel].timestamps
                 else:
                     common_timebase = np.array([])
-                signals = [sig.interp(common_timebase) for sig in signals]
+                signals = [sig.interp(common_timebase) if not isinstance(sig, (int, float)) else sig for sig in signals]
             else:
                 step = float(description["triggering_value"])
 
                 common_timebase = []
                 for signal in signals:
+                    if isinstance(signal, (int, float)):
+                        continue
+
                     if len(signal):
                         common_timebase.append(signal.timestamps[0])
                         common_timebase.append(signal.timestamps[-1])
@@ -885,24 +503,23 @@ def compute_signal(
                 else:
                     common_timebase = np.array([])
 
-                signals = [sig.interp(common_timebase) for sig in signals]
+                signals = [sig.interp(common_timebase) if not isinstance(sig, (int, float)) else sig for sig in signals]
 
-            if (
-                description.get("computation_mode", "sample_by_sample")
-                == "sample_by_sample"
-            ):
+            for i, (signal, arg_name) in enumerate(zip(signals, found_args)):
+                if isinstance(signal, (int, float)):
+                    value = signal
+                    signals[i] = Signal(
+                        name=arg_name, samples=np.full(len(common_timebase), value), timestamps=common_timebase
+                    )
+
+            if description.get("computation_mode", "sample_by_sample") == "sample_by_sample":
                 signals = [sig.samples.tolist() for sig in signals]
                 signals.append(common_timebase)
 
                 samples = []
                 for values in zip(*signals):
                     try:
-                        current_sample = func(
-                            **{
-                                arg_name: arg_val
-                                for arg_name, arg_val in zip(names, values)
-                            }
-                        )
+                        current_sample = func(**dict(zip(names, values)))
                     except:
                         current_sample = COMPUTED_FUNCTION_ERROR_VALUE
                     samples.append(current_sample)
@@ -919,11 +536,7 @@ def compute_signal(
 
                 signals.append(common_timebase)
 
-                not_found = [
-                    arg_name
-                    for arg_name in description["args"]
-                    if arg_name not in names
-                ]
+                not_found = [arg_name for arg_name in description["args"] if arg_name not in names]
 
                 not_found_signals = []
 
@@ -933,19 +546,12 @@ def compute_signal(
                     if arg_name in names:
                         continue
                     else:
-                        not_found_signals.append(
-                            np.ones(len(common_timebase), dtype="u1") * arg.default
-                        )
+                        not_found_signals.append(np.ones(len(common_timebase), dtype="u1") * arg.default)
 
                 names.extend(not_found)
                 signals.extend(not_found_signals)
 
-                samples = func(
-                    **{
-                        arg_name: arg_signal
-                        for arg_name, arg_signal in zip(names, signals)
-                    }
-                )
+                samples = func(**dict(zip(names, signals)))
                 if len(samples) != len(common_timebase):
                     common_timebase = common_timebase[-len(samples) :]
 
@@ -1142,9 +748,7 @@ def computation_to_python_function(description):
                 "channel_comment": description["channel_comment"],
                 "channel_name": description["channel_name"],
                 "channel_unit": description["channel_unit"],
-                "computation_mode": description.get(
-                    "computation_mode", "sample_by_sample"
-                ),
+                "computation_mode": description.get("computation_mode", "sample_by_sample"),
                 "definition": definition,
                 "type": "python_function",
                 "triggering": "triggering_on_all",
@@ -1153,9 +757,7 @@ def computation_to_python_function(description):
             }
         else:
             new_description = description
-            new_description["computation_mode"] = description.get(
-                "computation_mode", "sample_by_sample"
-            )
+            new_description["computation_mode"] = description.get("computation_mode", "sample_by_sample")
 
     return new_description
 
@@ -1166,9 +768,7 @@ def replace_computation_dependency(computation, old_name, new_name):
         if isinstance(val, str) and old_name in val:
             new_computation[key] = val.replace(old_name, new_name)
         elif isinstance(val, dict):
-            new_computation[key] = replace_computation_dependency(
-                val, old_name, new_name
-            )
+            new_computation[key] = replace_computation_dependency(val, old_name, new_name)
         else:
             new_computation[key] = val
 
@@ -1202,9 +802,71 @@ def copy_ranges(ranges):
         return ranges
 
 
-def get_colors_using_ranges(
-    value, ranges, default_background_color, default_font_color
-):
+def unique_ranges(ranges):
+    def compare(r):
+        v1, v2, op1, op2, c1, c2 = r
+        if v1 is None:
+            v1 = -float("inf")
+        if v2 is None:
+            v2 = -float("inf")
+
+        return v1, v2, op1, op2, c1, c2
+
+    if ranges:
+        new_ranges = set()
+        for range_info in ranges:
+            if isinstance(range_info["background_color"], QtGui.QColor):
+                new_ranges.add(
+                    (
+                        range_info["value1"],
+                        range_info["value2"],
+                        range_info["op1"],
+                        range_info["op2"],
+                        (0, range_info["background_color"].name()),
+                        (0, range_info["font_color"].name()),
+                    )
+                )
+            else:
+                new_ranges.add(
+                    (
+                        range_info["value1"],
+                        range_info["value2"],
+                        range_info["op1"],
+                        range_info["op2"],
+                        (1, range_info["background_color"].color().name()),
+                        (1, range_info["font_color"].color().name()),
+                    )
+                )
+
+        ranges = []
+        for value1, value2, op1, op2, bk_color, ft_color in sorted(new_ranges, key=compare):
+            if bk_color[0] == 0:
+                ranges.append(
+                    {
+                        "background_color": fn.mkColor(bk_color[1]),
+                        "font_color": fn.mkColor(ft_color[1]),
+                        "op1": op1,
+                        "op2": op2,
+                        "value1": value1,
+                        "value2": value2,
+                    }
+                )
+            else:
+                ranges.append(
+                    {
+                        "background_color": fn.mkBrush(bk_color[1]),
+                        "font_color": fn.mkBrush(ft_color[1]),
+                        "op1": op1,
+                        "op2": op2,
+                        "value1": value1,
+                        "value2": value2,
+                    }
+                )
+
+    return ranges
+
+
+def get_colors_using_ranges(value, ranges, default_background_color, default_font_color):
     new_background_color = default_background_color
     new_font_color = default_font_color
 
@@ -1344,21 +1006,6 @@ def get_color_using_ranges(
         return new_color
 
 
-def timeit(func):
-    def timed(*args, **kwargs):
-        t1 = perf_counter()
-        ret = func(*args, **kwargs)
-        t2 = perf_counter()
-        delta = t2 - t1
-        if delta >= 1e-3:
-            print(f"CALL {func.__qualname__}: {delta*1e3:.3f} ms")
-        else:
-            print(f"CALL {func.__qualname__}: {delta*1e6:.3f} us")
-        return ret
-
-    return timed
-
-
 def value_as_bin(value, dtype):
     byte_string = np.array([value], dtype=dtype).tobytes()
     if dtype.byteorder != ">":
@@ -1366,8 +1013,7 @@ def value_as_bin(value, dtype):
 
     nibles = []
     for byte in byte_string:
-        nibles.append(f"{byte >> 4:04b}")
-        nibles.append(f"{byte & 0xf:04b}")
+        nibles.extend((f"{byte >> 4:04b}", f"{byte & 0xf:04b}"))
 
     return ".".join(nibles)
 
@@ -1430,9 +1076,16 @@ def draw_color_icon(color):
     return QtGui.QIcon(pix)
 
 
-def generate_python_function(definition, in_globals=None):
+def generate_python_function(definition: str, in_globals: Union[Dict, None] = None) -> tuple:
     trace = None
     func = None
+
+    if not isinstance(definition, str):
+        trace = "The function definition must be a string"
+        return func, trace
+    if in_globals and not isinstance(in_globals, dict):
+        trace = "'in_globals' must be a dict"
+        return func, trace
 
     definition = definition.replace("\t", "    ")
 
@@ -1489,6 +1142,95 @@ def generate_python_function(definition, in_globals=None):
                         break
 
     return func, trace
+
+
+def check_generated_function(func, trace, function_source, silent, parent=None):
+    if trace is not None:
+        ErrorDialog(
+            title="Function definition check",
+            message="The syntax is not correct. The following error was found",
+            trace=f"{trace}\n\nin the function\n\n{function_source}",
+            parent=parent,
+        ).exec()
+        return False, None
+
+    args = inspect.signature(func)
+    kwargs = {}
+    for i, (arg_name, arg) in enumerate(args.parameters.items()):
+        kwargs[arg_name] = random.randint(1, 2**64)
+
+    trace = ""
+
+    # try with sample by sample call
+    sample_by_sample = True
+    try:
+        func(**kwargs)
+    except ZeroDivisionError:
+        pass
+    except:
+        sample_by_sample = False
+        trace = format_exc()
+
+    kwargs = {}
+    for i, (arg_name, arg) in enumerate(args.parameters.items()):
+        kwargs[arg_name] = np.ones(10000, dtype="i1") * random.randint(1, 2**64)
+
+    # try with complete signal call
+    complete_signal = True
+    try:
+        func(**kwargs)
+    except ZeroDivisionError:
+        pass
+    except:
+        complete_signal = False
+        if trace:
+            trace += "\n\n" + format_exc()
+        else:
+            trace = format_exc()
+
+    if not sample_by_sample and not complete_signal:
+        ErrorDialog(
+            title="Function definition check",
+            message="The syntax is not correct. The following error was found",
+            trace=f"{trace}\n\nin the function\n\n{function_source}",
+            parent=parent,
+        ).exec()
+
+        return False, None
+
+    elif not sample_by_sample:
+        if not silent:
+            MessageBox.information(
+                parent,
+                "Function definition check",
+                "The function definition appears to be correct only for complete signal mode.",
+            )
+
+        return True, func
+
+    elif not complete_signal:
+        if not silent:
+            MessageBox.information(
+                parent,
+                "Function definition check",
+                "The function definition appears to be correct only for sample by sample mode.",
+            )
+
+        return True, func
+    else:
+        if not silent:
+            MessageBox.information(
+                parent,
+                "Function definition check",
+                "The function definition appears to be correct for both sample by sample and complete signal modes.",
+            )
+
+        return True, func
+
+
+def set_app_user_model_id(app_user_model_id: str) -> None:
+    if sys.platform == "win32":
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_user_model_id)
 
 
 if __name__ == "__main__":

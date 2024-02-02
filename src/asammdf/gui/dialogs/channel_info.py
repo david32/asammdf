@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from ..ui import resource_rc
 from ..widgets.channel_info import ChannelInfoWidget
 
 
@@ -9,7 +7,7 @@ class ChannelInfoDialog(QtWidgets.QDialog):
     def __init__(self, channel, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.setWindowFlags(QtCore.Qt.Window)
+        self.setWindowFlags(QtCore.Qt.WindowType.Window)
 
         layout = QtWidgets.QVBoxLayout()
         self.setLayout(layout)
@@ -21,7 +19,7 @@ class ChannelInfoDialog(QtWidgets.QDialog):
         self.setStyleSheet('font: 8pt "Consolas";}')
 
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/info.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/info.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
 
         self.setWindowIcon(icon)
         self.setGeometry(240, 60, 1200, 600)

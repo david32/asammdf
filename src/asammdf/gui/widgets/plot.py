@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 import bisect
-from collections import defaultdict
 from datetime import timedelta
 from functools import lru_cache, partial, reduce
 import os
@@ -13,44 +11,33 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 import numpy as np
 import pyqtgraph as pg
-import pyqtgraph.canvas.CanvasTemplate_pyside6
-import pyqtgraph.canvas.TransformGuiTemplate_pyside6
-
-# imports for pyinstaller
+from pyqtgraph import Qt
 import pyqtgraph.functions as fn
-
-try:
-    import pyqtgraph.console.template_pyside6
-    import pyqtgraph.graphicsItems.PlotItem.plotConfigTemplate_pyside6
-    import pyqtgraph.graphicsItems.ViewBox.axisCtrlTemplate_pyside6
-    import pyqtgraph.GraphicsScene.exportDialogTemplate_pyside6
-    import pyqtgraph.imageview.ImageViewTemplate_pyside6
-except ImportError:
-    import pyqtgraph.graphicsItems.PlotItem.plotConfigTemplate_generic
-    import pyqtgraph.graphicsItems.ViewBox.axisCtrlTemplate_generic
-    import pyqtgraph.GraphicsScene.exportDialogTemplate_generic
-    import pyqtgraph.imageview.ImageViewTemplate_generic
-    import pyqtgraph.console.template_generic
-
 from PySide6 import QtCore, QtGui, QtWidgets
 
 PLOT_BUFFER_SIZE = 4000
 
+from ... import tool as Tool
 from ...blocks.conversion_utils import from_dict, to_dict
+from ...blocks.cutils import get_idx_with_edges, positions
 from ...blocks.utils import target_byte_order
-from ..utils import FONT_SIZE, timeit, value_as_str
+from ..dialogs.messagebox import MessageBox
+from ..utils import FONT_SIZE, value_as_str
 from .viewbox import ViewBoxWithCursor
-
-try:
-    from ...blocks.cutils import positions
-except:
-    pass
 
 
 @lru_cache(maxsize=1024)
 def polygon_and_ndarray(size):
-    polygon = fn.create_qpolygonf(size)
-    ndarray = fn.ndarray_from_qpolygonf(polygon)
+    polygon = QtGui.QPolygonF()
+    polygon.resize(size)
+
+    nbytes = 2 * len(polygon) * 8
+    ptr = polygon.data()
+    if ptr is None:
+        ptr = 0
+    buffer = Qt.shiboken.VoidPtr(ptr, nbytes, True)
+    ndarray = np.frombuffer(buffer, np.double).reshape((-1, 2))
+
     return polygon, ndarray
 
 
@@ -60,9 +47,7 @@ def monkey_patch_pyqtgraph():
             try:
                 return obj._id
             except AttributeError:
-                obj._id = next(
-                    pg.graphicsItems.ScatterPlotItem.SymbolAtlas._idGenerator
-                )
+                obj._id = next(pg.graphicsItems.ScatterPlotItem.SymbolAtlas._idGenerator)
                 return obj._id
 
         res = [
@@ -77,42 +62,21 @@ def monkey_patch_pyqtgraph():
 
         return res
 
-    # fixes https://github.com/pyqtgraph/pyqtgraph/issues/2117
-    def mouseReleaseEvent(self, ev):
-        if self.mouseGrabberItem() is None:
-            if ev.button() in self.dragButtons:
-                if self.sendDragEvent(ev, final=True):
-                    ev.accept()
-                self.dragButtons.remove(ev.button())
-            else:
-                cev = [e for e in self.clickEvents if e.button() == ev.button()]
-                if cev:
-                    if self.sendClickEvent(cev[0]):
-                        ev.accept()
-                    try:
-                        self.clickEvents.remove(cev[0])
-                    except:
-                        pass
-
-        if not ev.buttons():
-            self.dragItem = None
-            self.dragButtons = []
-            self.clickEvents = []
-            self.lastDrag = None
-        QtWidgets.QGraphicsScene.mouseReleaseEvent(self, ev)
-        self.sendHoverEvents(ev)
-
     mkColor_factory = fn.mkColor
     mkBrush_factory = fn.mkBrush
     mkPen_factory = fn.mkPen
 
     def mkColor(*args):
-        try:
-            return cached_mkColor_factory(*args)
-        except:
-            return mkColor_factory(*args)
+        if isinstance(args[0], QtGui.QColor):
+            return QtGui.QColor(args[0])
+        else:
+            try:
+                return cached_mkColor_factory(*args)
+            except:
+                # print(args, format_exc(), sep='\n')
+                return mkColor_factory(*args)
 
-    @lru_cache(maxsize=512)
+    @lru_cache(maxsize=2048)
     def cached_mkColor_factory(*args):
         return mkColor_factory(*args)
 
@@ -124,7 +88,7 @@ def monkey_patch_pyqtgraph():
         except:
             return mkBrush_factory(*args, **kwargs)
 
-    @lru_cache(maxsize=512)
+    @lru_cache(maxsize=2048)
     def cached_mkBrush_factory(*args, **kargs):
         return mkBrush_factory(*args, **kargs)
 
@@ -134,24 +98,24 @@ def monkey_patch_pyqtgraph():
         except:
             return mkPen_factory(*args, **kwargs)
 
-    @lru_cache(maxsize=512)
+    @lru_cache(maxsize=2048)
     def cached_mkPen_factory(*args, **kargs):
         return mkPen_factory(*args, **kargs)
 
     # speed-up monkey patches
     pg.graphicsItems.ScatterPlotItem.SymbolAtlas._keys = _keys
     pg.graphicsItems.ScatterPlotItem._USE_QRECT = False
-    pg.GraphicsScene.mouseReleaseEvent = mouseReleaseEvent
 
     fn.mkBrush = mkBrush
     fn.mkColor = mkColor
     fn.mkPen = mkPen
 
 
+from ...blocks.utils import extract_mime_names
 from ...mdf import MDF
 from ...signal import Signal
 from ..dialogs.define_channel import DefineChannel
-from ..utils import COLORS, COLORS_COUNT, copy_ranges, extract_mime_names
+from ..utils import COLORS, COLORS_COUNT, copy_ranges
 from .channel_stats import ChannelStats
 from .cursor import Bookmark, Cursor, Region
 from .dict_to_tree import ComputedChannelInfoWindow
@@ -169,7 +133,8 @@ float64 = np.float64
 
 
 def simple_min(a, b):
-    if b != b:
+    if b != b:  # noqa: PLR0124
+        # b is NaN
         return a
     if a <= b:
         return a
@@ -177,7 +142,8 @@ def simple_min(a, b):
 
 
 def simple_max(a, b):
-    if b != b:
+    if b != b:  # noqa: PLR0124
+        # b is NaN
         return a
     if a <= b:
         return b
@@ -196,7 +162,7 @@ def get_descriptions_by_uuid(mime):
 
 
 class PlotSignal(Signal):
-    def __init__(self, signal, index=0, trim_info=None, duplication=1):
+    def __init__(self, signal, index=0, trim_info=None, duplication=1, allow_trim=True, allow_nans=False):
         super().__init__(
             signal.samples,
             signal.timestamps,
@@ -232,12 +198,13 @@ class PlotSignal(Signal):
         self.precision = getattr(signal, "precision", 3)
 
         self._mode = "raw"
-        self._enable = True
+        self._enable = getattr(signal, "enable", 3)
 
         self.format = getattr(signal, "format", "phys")
 
         self.individual_axis = False
         self.computation = signal.computation
+        self.original_name = getattr(signal, "original_name", None)
 
         self.y_link = False
         self.y_range = (0, -1)
@@ -248,16 +215,17 @@ class PlotSignal(Signal):
         # take out NaN values
         samples = self.samples
         if samples.dtype.kind not in "SUV":
-            nans = np.isnan(samples)
-            if np.any(nans):
-                self.samples = self.samples[~nans]
-                self.timestamps = self.timestamps[~nans]
+            if not allow_nans:
+                nans = np.isnan(samples)
+                if np.any(nans):
+                    self.samples = self.samples[~nans]
+                    self.timestamps = self.timestamps[~nans]
 
         if self.samples.dtype.byteorder not in target_byte_order:
-            self.samples = self.samples.byteswap().newbyteorder()
+            self.samples = self.samples.byteswap().view(self.samples.dtype.newbyteorder())
 
         if self.timestamps.dtype.byteorder not in target_byte_order:
-            self.timestamps = self.timestamps.byteswap().newbyteorder()
+            self.timestamps = self.timestamps.byteswap().view(self.timestamps.dtype.n())
 
         if self.timestamps.dtype != float64:
             self.timestamps = self.timestamps.astype(float64)
@@ -265,20 +233,25 @@ class PlotSignal(Signal):
         self.text_conversion = None
 
         if self.conversion:
-            samples = self.conversion.convert(self.samples)
+            samples = self.conversion.convert(self.samples, as_bytes=True)
             if samples.dtype.kind not in "SUV":
-                nans = np.isnan(samples)
-                if np.any(nans):
-                    self.raw_samples = self.samples[~nans]
-                    self.phys_samples = samples[~nans]
-                    self.timestamps = self.timestamps[~nans]
-                    self.samples = self.samples[~nans]
+                if not allow_nans:
+                    nans = np.isnan(samples)
+                    if np.any(nans):
+                        self.raw_samples = self.samples[~nans]
+                        self.phys_samples = samples[~nans]
+                        self.timestamps = self.timestamps[~nans]
+                        self.samples = self.samples[~nans]
+                    else:
+                        self.raw_samples = self.samples
+                        self.phys_samples = samples
                 else:
                     self.raw_samples = self.samples
                     self.phys_samples = samples
             else:
                 self.text_conversion = self.conversion
                 self.phys_samples = self.raw_samples = self.samples
+
         else:
             self.phys_samples = self.raw_samples = self.samples
 
@@ -299,7 +272,7 @@ class PlotSignal(Signal):
             color = COLORS[index % COLORS_COUNT]
         self.color = fn.mkColor(color)
         self.color_name = self.color.name()
-        self.pen = fn.mkPen(color=color, style=QtCore.Qt.SolidLine)
+        self.pen = fn.mkPen(color=color, style=QtCore.Qt.PenStyle.SolidLine)
 
         self._min = None
         self._max = None
@@ -316,7 +289,8 @@ class PlotSignal(Signal):
         self._compute_basic_stats()
 
         self.mode = getattr(signal, "mode", "phys")
-        self.trim(*(trim_info or (None, None, 1900)))
+        if allow_trim:
+            self.trim(*(trim_info or (None, None, 1900)))
 
     @property
     def avg(self):
@@ -555,9 +529,7 @@ class PlotSignal(Signal):
 
                     value, kind, _ = self.value_at_timestamp(position)
 
-                    stats["cursor_value"] = value_as_str(
-                        value, format, self.plot_samples.dtype, precision
-                    )
+                    stats["cursor_value"] = value_as_str(value, format, self.plot_samples.dtype, precision)
 
                 else:
                     stats["cursor_t"] = ""
@@ -565,27 +537,17 @@ class PlotSignal(Signal):
 
                 if region:
                     start, stop = region
-                    stats["selected_start"] = value_as_str(
-                        start, format, np.dtype("f8"), precision
-                    )
-                    stats["selected_stop"] = value_as_str(
-                        stop, format, np.dtype("f8"), precision
-                    )
-                    stats["selected_delta_t"] = value_as_str(
-                        stop - start, format, np.dtype("f8"), precision
-                    )
+                    stats["selected_start"] = value_as_str(start, format, np.dtype("f8"), precision)
+                    stats["selected_stop"] = value_as_str(stop, format, np.dtype("f8"), precision)
+                    stats["selected_delta_t"] = value_as_str(stop - start, format, np.dtype("f8"), precision)
 
                     value, kind, _ = self.value_at_timestamp(start)
 
-                    stats["selected_left"] = value_as_str(
-                        value, format, self.plot_samples.dtype, precision
-                    )
+                    stats["selected_left"] = value_as_str(value, format, self.plot_samples.dtype, precision)
 
                     value, kind, _ = self.value_at_timestamp(stop)
 
-                    stats["selected_right"] = value_as_str(
-                        value, format, self.plot_samples.dtype, precision
-                    )
+                    stats["selected_right"] = value_as_str(value, format, self.plot_samples.dtype, precision)
 
                 else:
                     stats["selected_start"] = ""
@@ -616,8 +578,7 @@ class PlotSignal(Signal):
                     stats["overall_integral"] = 0
                 else:
                     stats["overall_gradient"] = value_as_str(
-                        (float(sig.samples[-1]) - float(sig.samples[0]))
-                        / (sig.timestamps[-1] - sig.timestamps[0]),
+                        (float(sig.samples[-1]) - float(sig.samples[0])) / (sig.timestamps[-1] - sig.timestamps[0]),
                         format,
                         None,
                         precision,
@@ -626,47 +587,31 @@ class PlotSignal(Signal):
                         np.trapz(sig.samples, sig.timestamps), format, None, precision
                     )
 
-                stats["overall_min"] = value_as_str(
-                    self.min, format, self.plot_samples.dtype, precision
-                )
-                stats["overall_max"] = value_as_str(
-                    self.max, format, self.plot_samples.dtype, precision
-                )
-                stats["overall_average"] = value_as_str(
-                    sig.avg, format, None, precision
-                )
+                stats["overall_min"] = value_as_str(self.min, format, self.plot_samples.dtype, precision)
+                stats["overall_max"] = value_as_str(self.max, format, self.plot_samples.dtype, precision)
+                stats["overall_average"] = value_as_str(sig.avg, format, None, precision)
                 stats["overall_rms"] = value_as_str(sig.rms, format, None, precision)
                 stats["overall_std"] = value_as_str(sig.std, format, None, precision)
-                stats["overall_start"] = value_as_str(
-                    sig.timestamps[0], format, np.dtype("f8"), precision
-                )
-                stats["overall_stop"] = value_as_str(
-                    sig.timestamps[-1], format, np.dtype("f8"), precision
-                )
+                stats["overall_start"] = value_as_str(sig.timestamps[0], format, np.dtype("f8"), precision)
+                stats["overall_stop"] = value_as_str(sig.timestamps[-1], format, np.dtype("f8"), precision)
                 stats["overall_delta"] = value_as_str(
                     sig.samples[-1] - sig.samples[0],
                     format,
                     self.plot_samples.dtype,
                     precision,
                 )
-                stats["overall_delta_t"] = value_as_str(
-                    x[-1] - x[0], format, np.dtype("f8"), precision
-                )
+                stats["overall_delta_t"] = value_as_str(x[-1] - x[0], format, np.dtype("f8"), precision)
                 stats["unit"] = sig.unit
                 stats["color"] = sig.color
                 stats["name"] = sig.name
 
                 if cursor is not None:
                     position = cursor
-                    stats["cursor_t"] = value_as_str(
-                        position, format, np.dtype("f8"), precision
-                    )
+                    stats["cursor_t"] = value_as_str(position, format, np.dtype("f8"), precision)
 
                     value, kind, _ = self.value_at_timestamp(position)
 
-                    stats["cursor_value"] = value_as_str(
-                        value, format, self.plot_samples.dtype, precision
-                    )
+                    stats["cursor_value"] = value_as_str(value, format, self.plot_samples.dtype, precision)
 
                 else:
                     stats["cursor_t"] = ""
@@ -676,15 +621,9 @@ class PlotSignal(Signal):
                     start, stop = region
 
                     new_stats = {}
-                    new_stats["selected_start"] = value_as_str(
-                        start, format, np.dtype("f8"), precision
-                    )
-                    new_stats["selected_stop"] = value_as_str(
-                        stop, format, np.dtype("f8"), precision
-                    )
-                    new_stats["selected_delta_t"] = value_as_str(
-                        stop - start, format, np.dtype("f8"), precision
-                    )
+                    new_stats["selected_start"] = value_as_str(start, format, np.dtype("f8"), precision)
+                    new_stats["selected_stop"] = value_as_str(stop, format, np.dtype("f8"), precision)
+                    new_stats["selected_delta_t"] = value_as_str(stop - start, format, np.dtype("f8"), precision)
 
                     cut = sig.cut(start, stop)
 
@@ -708,18 +647,10 @@ class PlotSignal(Signal):
                             samples[-1], format, self.plot_samples.dtype, precision
                         )
 
-                        new_stats["selected_min"] = value_as_str(
-                            np.nanmin(samples), format, samples.dtype, precision
-                        )
-                        new_stats["selected_max"] = value_as_str(
-                            np.nanmax(samples), format, samples.dtype, precision
-                        )
-                        new_stats["selected_average"] = value_as_str(
-                            np.mean(samples), format, None, precision
-                        )
-                        new_stats["selected_std"] = value_as_str(
-                            np.std(samples), format, None, precision
-                        )
+                        new_stats["selected_min"] = value_as_str(np.nanmin(samples), format, samples.dtype, precision)
+                        new_stats["selected_max"] = value_as_str(np.nanmax(samples), format, samples.dtype, precision)
+                        new_stats["selected_average"] = value_as_str(np.mean(samples), format, None, precision)
+                        new_stats["selected_std"] = value_as_str(np.std(samples), format, None, precision)
                         new_stats["selected_rms"] = value_as_str(
                             np.sqrt(np.mean(np.square(samples))),
                             format,
@@ -746,8 +677,7 @@ class PlotSignal(Signal):
                             new_stats["selected_integral"] = 0
                         else:
                             new_stats["selected_gradient"] = value_as_str(
-                                (float(samples[-1]) - float(samples[0]))
-                                / (timestamps[-1] - timestamps[0]),
+                                (float(samples[-1]) - float(samples[0])) / (timestamps[-1] - timestamps[0]),
                                 format,
                                 None,
                                 precision,
@@ -791,15 +721,9 @@ class PlotSignal(Signal):
                 start, stop = view_region
 
                 new_stats = {}
-                new_stats["visible_start"] = value_as_str(
-                    start, format, np.dtype("f8"), precision
-                )
-                new_stats["visible_stop"] = value_as_str(
-                    stop, format, np.dtype("f8"), precision
-                )
-                new_stats["visible_delta_t"] = value_as_str(
-                    stop - start, format, np.dtype("f8"), precision
-                )
+                new_stats["visible_start"] = value_as_str(start, format, np.dtype("f8"), precision)
+                new_stats["visible_stop"] = value_as_str(stop, format, np.dtype("f8"), precision)
+                new_stats["visible_delta_t"] = value_as_str(stop - start, format, np.dtype("f8"), precision)
 
                 cut = sig.cut(start, stop)
 
@@ -817,18 +741,10 @@ class PlotSignal(Signal):
                 if size:
                     kind = samples.dtype.kind
 
-                    new_stats["visible_min"] = value_as_str(
-                        np.nanmin(samples), format, samples.dtype, precision
-                    )
-                    new_stats["visible_max"] = value_as_str(
-                        np.nanmax(samples), format, samples.dtype, precision
-                    )
-                    new_stats["visible_average"] = value_as_str(
-                        np.mean(samples), format, None, precision
-                    )
-                    new_stats["visible_std"] = value_as_str(
-                        np.std(samples), format, None, precision
-                    )
+                    new_stats["visible_min"] = value_as_str(np.nanmin(samples), format, samples.dtype, precision)
+                    new_stats["visible_max"] = value_as_str(np.nanmax(samples), format, samples.dtype, precision)
+                    new_stats["visible_average"] = value_as_str(np.mean(samples), format, None, precision)
+                    new_stats["visible_std"] = value_as_str(np.std(samples), format, None, precision)
                     new_stats["visible_rms"] = value_as_str(
                         np.sqrt(np.mean(np.square(samples))), format, None, precision
                     )
@@ -852,8 +768,7 @@ class PlotSignal(Signal):
                         new_stats["visible_integral"] = 0
                     else:
                         new_stats["visible_gradient"] = value_as_str(
-                            (float(samples[-1]) - float(samples[0]))
-                            / (timestamps[-1] - timestamps[0]),
+                            (float(samples[-1]) - float(samples[0])) / (timestamps[-1] - timestamps[0]),
                             format,
                             None,
                             precision,
@@ -895,9 +810,7 @@ class PlotSignal(Signal):
 
             if cursor is not None:
                 position = cursor
-                stats["cursor_t"] = value_as_str(
-                    position, format, np.dtype("f8"), precision
-                )
+                stats["cursor_t"] = value_as_str(position, format, np.dtype("f8"), precision)
 
                 stats["cursor_value"] = "n.a."
 
@@ -908,15 +821,9 @@ class PlotSignal(Signal):
             if region is not None:
                 start, stop = region
 
-                stats["selected_start"] = value_as_str(
-                    start, format, np.dtype("f8"), precision
-                )
-                stats["selected_stop"] = value_as_str(
-                    stop, format, np.dtype("f8"), precision
-                )
-                stats["selected_delta_t"] = value_as_str(
-                    stop - start, format, np.dtype("f8"), precision
-                )
+                stats["selected_start"] = value_as_str(start, format, np.dtype("f8"), precision)
+                stats["selected_stop"] = value_as_str(stop, format, np.dtype("f8"), precision)
+                stats["selected_delta_t"] = value_as_str(stop - start, format, np.dtype("f8"), precision)
 
                 stats["selected_min"] = "n.a."
                 stats["selected_max"] = "n.a."
@@ -946,15 +853,9 @@ class PlotSignal(Signal):
 
             start, stop = view_region
 
-            stats["visible_start"] = value_as_str(
-                start, format, np.dtype("f8"), precision
-            )
-            stats["visible_stop"] = value_as_str(
-                stop, format, np.dtype("f8"), precision
-            )
-            stats["visible_delta_t"] = value_as_str(
-                stop - start, format, np.dtype("f8"), precision
-            )
+            stats["visible_start"] = value_as_str(start, format, np.dtype("f8"), precision)
+            stats["visible_stop"] = value_as_str(stop, format, np.dtype("f8"), precision)
+            stats["visible_delta_t"] = value_as_str(stop - start, format, np.dtype("f8"), precision)
 
             stats["visible_min"] = "n.a."
             stats["visible_max"] = "n.a."
@@ -1042,7 +943,7 @@ class PlotSignal(Signal):
 
     def set_color(self, color):
         self.color = color
-        self.pen = fn.mkPen(color=color, style=QtCore.Qt.SolidLine)
+        self.pen = fn.mkPen(color=color, style=QtCore.Qt.PenStyle.SolidLine)
 
     def set_home(self, y_range=None):
         self.home = y_range or self.y_range
@@ -1123,13 +1024,11 @@ class PlotSignal(Signal):
                         self._dtype = "f8"
 
                     if samples.dtype != self._plot_samples.dtype:
-                        self._plot_samples = np.empty(
-                            2 * PLOT_BUFFER_SIZE, dtype=samples.dtype
-                        )
+                        self._plot_samples = np.empty(2 * PLOT_BUFFER_SIZE, dtype=samples.dtype)
 
                         self._dtype = samples.dtype
 
-                    if samples.flags.c_contiguous:
+                    if samples.flags.c_contiguous and timestamps.flags.c_contiguous:
                         positions(
                             samples,
                             timestamps,
@@ -1226,7 +1125,7 @@ class PlotSignal(Signal):
                     visible = abs(int((stop_t - start_t) / (stop - start) * width))
 
                     if visible:
-                        visible_duplication = abs((stop_ - start_)) // visible
+                        visible_duplication = abs(stop_ - start_) // visible
                     else:
                         visible_duplication = 0
                 except:
@@ -1236,9 +1135,7 @@ class PlotSignal(Signal):
                     rows = (stop_ - start_) // visible_duplication
                     stop_2 = start_ + rows * visible_duplication
 
-                    samples = signal_samples[start_:stop_2].reshape(
-                        rows, visible_duplication
-                    )
+                    samples = signal_samples[start_:stop_2].reshape(rows, visible_duplication)
 
                     try:
                         pos_max = samples.argmax(axis=1)
@@ -1275,11 +1172,7 @@ class PlotSignal(Signal):
                             pos_max = np.nanargmax(samples_)
                             pos_min = np.nanargmin(samples_)
 
-                        pos2 = (
-                            [pos_min, pos_max]
-                            if pos_min < pos_max
-                            else [pos_max, pos_min]
-                        )
+                        pos2 = [pos_min, pos_max] if pos_min < pos_max else [pos_max, pos_min]
 
                         _size = len(pos)
 
@@ -1337,9 +1230,14 @@ class PlotSignal(Signal):
         else:
             kind = self.phys_samples.dtype.kind
 
-        if index is None:
+        size = len(self)
+
+        if index is None or size == 0:
             value = "n.a."
         else:
+            if index >= size:
+                index = size - 1
+
             if self.mode == "raw":
                 value = self.raw_samples[index]
             else:
@@ -1384,9 +1282,7 @@ class PlotSignal(Signal):
                 try:
                     value = value.decode("utf-8", errors="replace").strip(" \r\n\t\v\0")
                 except:
-                    value = value.decode("latin-1", errors="replace").strip(
-                        " \r\n\t\v\0"
-                    )
+                    value = value.decode("latin-1", errors="replace").strip(" \r\n\t\v\0")
 
                 value = value or "<empty string>"
             elif kind == "f":
@@ -1422,6 +1318,7 @@ class Plot(QtWidgets.QWidget):
     splitter_moved = QtCore.Signal(object, int)
     pattern_group_added = QtCore.Signal(object, object)
     verify_bookmarks = QtCore.Signal(list, object)
+    x_range_changed_signal = QtCore.Signal(object, object)
 
     item_double_click_handling = "enable/disable"
     dynamic_columns_width = True
@@ -1434,7 +1331,6 @@ class Plot(QtWidgets.QWidget):
         origin=None,
         mdf=None,
         line_interconnect="line",
-        line_width=1,
         hide_missing_channels=False,
         hide_disabled_channels=False,
         x_axis="time",
@@ -1450,8 +1346,10 @@ class Plot(QtWidgets.QWidget):
         **kwargs,
     ):
         events = kwargs.pop("events", None)
+
         self.owner = owner
         self.enable_zoom_history = enable_zoom_history
+
         super().__init__(*args, **kwargs)
         self.closed = False
         self.line_interconnect = line_interconnect
@@ -1467,12 +1365,11 @@ class Plot(QtWidgets.QWidget):
         self.info_uuid = None
 
         self._can_switch_mode = True
+        self._inhibit_x_range_changed_signal = False
         self._inhibit_timestamp_signals = False
         self._inhibit_timestamp_signals_timer = QtCore.QTimer()
         self._inhibit_timestamp_signals_timer.setSingleShot(True)
-        self._inhibit_timestamp_signals_timer.timeout.connect(
-            self._inhibit_timestamp_handler
-        )
+        self._inhibit_timestamp_signals_timer.timeout.connect(self._inhibit_timestamp_handler)
         self.can_edit_ranges = True
 
         self.region_values_display_mode = region_values_display_mode
@@ -1501,7 +1398,7 @@ class Plot(QtWidgets.QWidget):
         self.splitter.addWidget(widget)
         self.splitter.setOpaqueResize(False)
 
-        self.plot = _Plot(
+        self.plot = PlotGraphics(
             with_dots=with_dots,
             line_interconnect=self.line_interconnect,
             parent=self,
@@ -1540,73 +1437,67 @@ class Plot(QtWidgets.QWidget):
         menu = QtWidgets.QMenu()
 
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/home.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/home.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         menu.addAction(
             icon,
             "Home",
             lambda: self.plot.keyPressEvent(
                 QtGui.QKeyEvent(
-                    QtCore.QEvent.KeyPress,
-                    QtCore.Qt.Key_W,
-                    QtCore.Qt.NoModifier,
+                    QtCore.QEvent.Type.KeyPress,
+                    QtCore.Qt.Key.Key_W,
+                    QtCore.Qt.KeyboardModifier.NoModifier,
                 )
             ),
         )
 
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/axis.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/axis.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         menu.addAction(
             icon,
             "Honeywell",
             lambda: self.plot.keyPressEvent(
                 QtGui.QKeyEvent(
-                    QtCore.QEvent.KeyPress,
-                    QtCore.Qt.Key_H,
-                    QtCore.Qt.NoModifier,
+                    QtCore.QEvent.Type.KeyPress,
+                    QtCore.Qt.Key.Key_H,
+                    QtCore.Qt.KeyboardModifier.NoModifier,
                 )
             ),
         )
 
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/fit.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/fit.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         menu.addAction(
             icon,
             "Fit",
             lambda: self.plot.keyPressEvent(
                 QtGui.QKeyEvent(
-                    QtCore.QEvent.KeyPress,
-                    QtCore.Qt.Key_F,
-                    QtCore.Qt.NoModifier,
+                    QtCore.QEvent.Type.KeyPress,
+                    QtCore.Qt.Key.Key_F,
+                    QtCore.Qt.KeyboardModifier.NoModifier,
                 )
             ),
         )
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/stack.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/stack.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         menu.addAction(
             icon,
             "Stack",
             lambda: self.plot.keyPressEvent(
                 QtGui.QKeyEvent(
-                    QtCore.QEvent.KeyPress,
-                    QtCore.Qt.Key_S,
-                    QtCore.Qt.NoModifier,
+                    QtCore.QEvent.Type.KeyPress,
+                    QtCore.Qt.Key.Key_S,
+                    QtCore.Qt.KeyboardModifier.NoModifier,
                 )
             ),
         )
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/increase-font.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/increase-font.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         menu.addAction(icon, "Increase font", self.increase_font)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/decrease-font.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/decrease-font.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         menu.addAction(icon, "Decrease font", self.decrease_font)
 
         btn.setMenu(menu)
@@ -1617,16 +1508,14 @@ class Plot(QtWidgets.QWidget):
         btn.clicked.connect(
             lambda x: self.plot.keyPressEvent(
                 QtGui.QKeyEvent(
-                    QtCore.QEvent.KeyPress,
-                    QtCore.Qt.Key_I,
-                    QtCore.Qt.NoModifier,
+                    QtCore.QEvent.Type.KeyPress,
+                    QtCore.Qt.Key.Key_I,
+                    QtCore.Qt.KeyboardModifier.NoModifier,
                 )
             )
         )
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/zoom-in.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/zoom-in.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         btn.setIcon(icon)
         btn.setToolTip("Zoom in")
         hbox.addWidget(btn)
@@ -1635,16 +1524,14 @@ class Plot(QtWidgets.QWidget):
         btn.clicked.connect(
             lambda x: self.plot.keyPressEvent(
                 QtGui.QKeyEvent(
-                    QtCore.QEvent.KeyPress,
-                    QtCore.Qt.Key_O,
-                    QtCore.Qt.NoModifier,
+                    QtCore.QEvent.Type.KeyPress,
+                    QtCore.Qt.Key.Key_O,
+                    QtCore.Qt.KeyboardModifier.NoModifier,
                 )
             )
         )
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/zoom-out.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/zoom-out.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         btn.setIcon(icon)
         btn.setToolTip("Zoom out")
         hbox.addWidget(btn)
@@ -1653,9 +1540,7 @@ class Plot(QtWidgets.QWidget):
             self.undo_btn = btn = QtWidgets.QPushButton("")
             btn.clicked.connect(self.undo_zoom)
             icon = QtGui.QIcon()
-            icon.addPixmap(
-                QtGui.QPixmap(":/undo.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-            )
+            icon.addPixmap(QtGui.QPixmap(":/undo.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
             btn.setIcon(icon)
             btn.setToolTip("Undo zoom")
             hbox.addWidget(btn)
@@ -1664,20 +1549,17 @@ class Plot(QtWidgets.QWidget):
             self.redo_btn = btn = QtWidgets.QPushButton("")
             btn.clicked.connect(self.redo_zoom)
             icon = QtGui.QIcon()
-            icon.addPixmap(
-                QtGui.QPixmap(":/redo.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-            )
+            icon.addPixmap(QtGui.QPixmap(":/redo.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
             btn.setIcon(icon)
             btn.setToolTip("Redo zoom")
             hbox.addWidget(btn)
             btn.setEnabled(False)
 
         self.lock_btn = btn = QtWidgets.QPushButton("")
+        btn.setObjectName("lock_btn")
         btn.clicked.connect(self.set_locked)
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/unlocked.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/unlocked.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         btn.setIcon(icon)
         btn.setToolTip("The Y axis is unlocked. Press to lock")
         hbox.addWidget(btn)
@@ -1685,61 +1567,46 @@ class Plot(QtWidgets.QWidget):
         self.locked = False
 
         self.hide_axes_btn = btn = QtWidgets.QPushButton("")
+        btn.setObjectName("hide_axes_btn")
         self.hide_axes_btn.clicked.connect(self.hide_axes)
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/axis.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/axis_on.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         btn.setIcon(icon)
         btn.setToolTip("Hide axis")
         hbox.addWidget(self.hide_axes_btn)
 
         self.selected_channel_value_btn = btn = QtWidgets.QPushButton("")
-        self.selected_channel_value_btn.clicked.connect(
-            self.hide_selected_channel_value
-        )
+        btn.setObjectName("selected_channel_value_btn")
+        self.selected_channel_value_btn.clicked.connect(self.hide_selected_channel_value)
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/number.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/number_on.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         btn.setIcon(icon)
         btn.setToolTip("Hide axis")
         hbox.addWidget(self.selected_channel_value_btn)
 
         self.focused_mode_btn = btn = QtWidgets.QPushButton("")
+        btn.setObjectName("focused_mode_btn")
         self.focused_mode_btn.clicked.connect(self.toggle_focused_mode)
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/focus.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/focus_on.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         btn.setIcon(icon)
         btn.setToolTip("Toggle focused mode")
         hbox.addWidget(self.focused_mode_btn)
 
         self.delta_btn = btn = QtWidgets.QPushButton("")
+        btn.setObjectName("delta_btn")
         self.delta_btn.clicked.connect(self.toggle_region_values_display_mode)
         icon = QtGui.QIcon()
-        pix = QtGui.QPixmap(64, 64)
-        color = QtGui.QColor("#000000")
-        color.setAlpha(0)
-        pix.fill(color)
-        painter = QtGui.QPainter(pix)
-        font = painter.font()
-        font.setPointSize(48)
-        font.setBold(True)
-        painter.setFont(font)
-        painter.setPen(QtGui.QColor("#61b2e2"))
-        painter.drawText(QtCore.QPoint(12, 52), "Δ")
-        painter.end()
-        icon.addPixmap(pix, QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/delta_on.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         btn.setIcon(icon)
         btn.setToolTip("Toggle region values display mode")
         hbox.addWidget(self.delta_btn)
 
         self.bookmark_btn = btn = QtWidgets.QPushButton("")
+        btn.setObjectName("bookmark_btn")
         btn.clicked.connect(self.toggle_bookmarks)
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/bookmark.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/bookmark_on.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         btn.setIcon(icon)
         btn.setToolTip("Toggle bookmarks")
         hbox.addWidget(btn)
@@ -1748,7 +1615,7 @@ class Plot(QtWidgets.QWidget):
 
         self.selected_channel_value = QtWidgets.QLabel("")
         self.selected_channel_value.setAlignment(
-            QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
+            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
         )
         self.selected_channel_value.setAutoFillBackground(True)
         font = self.selected_channel_value.font()
@@ -1761,26 +1628,22 @@ class Plot(QtWidgets.QWidget):
         vbox.addWidget(self.channel_selection)
         vbox.addWidget(self.cursor_info)
 
-        self.range_proxy = pg.SignalProxy(
-            self.plot.range_modified, rateLimit=16, slot=self.range_modified
-        )
+        self.range_proxy = pg.SignalProxy(self.plot.range_modified, rateLimit=16, slot=self.range_modified)
         # self.plot.range_modified.connect(self.range_modified)
         self.plot.range_removed.connect(self.range_removed)
         self.plot.range_modified_finished.connect(self.range_modified_finished)
         self.plot.cursor_removed.connect(self.cursor_removed)
         self.plot.current_uuid_changed.connect(self.current_uuid_changed)
 
-        self.cursor_proxy = pg.SignalProxy(
-            self.plot.cursor_moved, rateLimit=16, slot=self.cursor_moved
-        )
+        self.cursor_proxy = pg.SignalProxy(self.plot.cursor_moved, rateLimit=16, slot=self.cursor_moved)
         # self.plot.cursor_moved.connect(self.cursor_moved)
         self.plot.cursor_move_finished.connect(self.cursor_move_finished)
         self.plot.xrange_changed.connect(self.xrange_changed)
-        self.plot.computation_channel_inserted.connect(
-            self.computation_channel_inserted
-        )
+        self.plot.computation_channel_inserted.connect(self.computation_channel_inserted)
         self.plot.curve_clicked.connect(self.curve_clicked)
         self._visible_entries = set()
+        self.visible_entries_modified = False
+        self.lock = Lock()
         self._visible_items = {}
         self._item_cache = {}
 
@@ -1818,19 +1681,11 @@ class Plot(QtWidgets.QWidget):
         if signals:
             unitColumnWidth = max([len(signal.unit) + 10 for signal in signals])
 
-        self.channel_selection.setColumnWidth(
-            self.channel_selection.NameColumn, nameColumnWidth
-        )
+        self.channel_selection.setColumnWidth(self.channel_selection.NameColumn, nameColumnWidth)
         self.channel_selection.setColumnWidth(self.channel_selection.ValueColumn, 83)
-        self.channel_selection.setColumnWidth(
-            self.channel_selection.UnitColumn, unitColumnWidth
-        )
-        self.channel_selection.setColumnWidth(
-            self.channel_selection.CommonAxisColumn, 35
-        )
-        self.channel_selection.setColumnWidth(
-            self.channel_selection.IndividualAxisColumn, 35
-        )
+        self.channel_selection.setColumnWidth(self.channel_selection.UnitColumn, unitColumnWidth)
+        self.channel_selection.setColumnWidth(self.channel_selection.CommonAxisColumn, 35)
+        self.channel_selection.setColumnWidth(self.channel_selection.IndividualAxisColumn, 35)
         self.hide()
 
         if signals:
@@ -1843,12 +1698,9 @@ class Plot(QtWidgets.QWidget):
 
         self.channel_selection.itemsDeleted.connect(self.channel_selection_reduced)
         self.channel_selection.group_activation_changed.connect(self.plot.update)
-        self.channel_selection.currentItemChanged.connect(
-            self.channel_selection_row_changed
-        )
-        self.channel_selection.itemSelectionChanged.connect(
-            self.channel_selection_changed
-        )
+        self.channel_selection.group_activation_changed.connect(self.cursor_moved)
+        self.channel_selection.currentItemChanged.connect(self.channel_selection_row_changed)
+        self.channel_selection.itemSelectionChanged.connect(self.channel_selection_changed)
         self.channel_selection.add_channels_request.connect(self.add_channels_request)
         self.channel_selection.set_time_offset.connect(self.plot.set_time_offset)
         self.channel_selection.show_properties.connect(self._show_properties)
@@ -1856,103 +1708,85 @@ class Plot(QtWidgets.QWidget):
         self.channel_selection.edit_computation.connect(self.plot.edit_computation)
         self.channel_selection.itemClicked.connect(self.flash_curve)
 
-        self.channel_selection.model().dataChanged.connect(
-            self.channel_selection_item_changed
-        )
+        self.channel_selection.model().dataChanged.connect(self.channel_selection_item_changed)
 
-        self.channel_selection.visible_items_changed.connect(
-            self._update_visibile_entries
-        )
+        self.channel_selection.visible_items_changed.connect(self._update_visibile_entries)
 
         self.channel_selection.pattern_group_added.connect(self.pattern_group_added_req)
-        self.channel_selection.double_click.connect(
-            self.channel_selection_item_double_clicked
-        )
+        self.channel_selection.double_click.connect(self.channel_selection_item_double_clicked)
 
         self.channel_selection.compute_fft_request.connect(self.compute_fft)
         self.channel_selection.itemExpanded.connect(self.update_current_values)
-        self.channel_selection.verticalScrollBar().valueChanged.connect(
-            self.update_current_values
-        )
+        self.channel_selection.verticalScrollBar().valueChanged.connect(self.update_current_values)
 
-        self.keyboard_events = (
-            set(
-                [
-                    QtCore.QKeyCombination(
-                        QtCore.Qt.NoModifier,
-                        QtCore.Qt.Key_M,
-                    ).toCombined(),
-                    QtCore.QKeyCombination(
-                        QtCore.Qt.NoModifier,
-                        QtCore.Qt.Key_C,
-                    ).toCombined(),
-                    QtCore.QKeyCombination(
-                        QtCore.Qt.ControlModifier,
-                        QtCore.Qt.Key_C,
-                    ).toCombined(),
-                    QtCore.QKeyCombination(
-                        QtCore.Qt.ControlModifier,
-                        QtCore.Qt.Key_B,
-                    ).toCombined(),
-                    QtCore.QKeyCombination(
-                        QtCore.Qt.ControlModifier,
-                        QtCore.Qt.Key_H,
-                    ).toCombined(),
-                    QtCore.QKeyCombination(
-                        QtCore.Qt.ControlModifier,
-                        QtCore.Qt.Key_P,
-                    ).toCombined(),
-                    QtCore.QKeyCombination(
-                        QtCore.Qt.ControlModifier,
-                        QtCore.Qt.Key_T,
-                    ).toCombined(),
-                    QtCore.QKeyCombination(
-                        QtCore.Qt.ControlModifier,
-                        QtCore.Qt.Key_G,
-                    ).toCombined(),
-                    QtCore.QKeyCombination(
-                        QtCore.Qt.NoModifier,
-                        QtCore.Qt.Key_2,
-                    ).toCombined(),
-                    QtCore.QKeyCombination(
-                        QtCore.Qt.NoModifier,
-                        QtCore.Qt.Key_BracketLeft,
-                    ).toCombined(),
-                    QtCore.QKeyCombination(
-                        QtCore.Qt.NoModifier,
-                        QtCore.Qt.Key_BracketRight,
-                    ).toCombined(),
-                    QtCore.QKeyCombination(
-                        QtCore.Qt.NoModifier,
-                        QtCore.Qt.Key_Backspace,
-                    ).toCombined(),
-                    QtCore.QKeyCombination(
-                        QtCore.Qt.ShiftModifier,
-                        QtCore.Qt.Key_Backspace,
-                    ).toCombined(),
-                ]
-            )
-            | self.plot.keyboard_events
-        )
+        self.keyboard_events = {
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.Key.Key_M,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.Key.Key_C,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ControlModifier,
+                QtCore.Qt.Key.Key_C,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ControlModifier,
+                QtCore.Qt.Key.Key_B,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ControlModifier,
+                QtCore.Qt.Key.Key_H,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ControlModifier,
+                QtCore.Qt.Key.Key_P,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ControlModifier,
+                QtCore.Qt.Key.Key_T,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ControlModifier,
+                QtCore.Qt.Key.Key_G,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.Key.Key_2,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.Key.Key_BracketLeft,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.Key.Key_BracketRight,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.Key.Key_Backspace,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ShiftModifier,
+                QtCore.Qt.Key.Key_Backspace,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ShiftModifier,
+                QtCore.Qt.Key.Key_W,
+            ).toCombined(),
+        } | self.plot.keyboard_events
 
         self.splitter.splitterMoved.connect(self.set_splitter)
-        self.line_width = line_width
 
         self.hide_selected_channel_value(
-            hide=self._settings.value(
-                "plot_hide_selected_channel_value", False, type=bool
-            )
+            hide=self._settings.value("plot_hide_selected_channel_value", False, type=bool)
         )
-        self.toggle_focused_mode(
-            focused=self._settings.value("plot_focused_mode", False, type=bool)
-        )
-        self.toggle_region_values_display_mode(
-            mode=self._settings.value("plot_region_values_display_mode", "value")
-        )
+        self.toggle_focused_mode(focused=self._settings.value("plot_focused_mode", False, type=bool))
+        self.toggle_region_values_display_mode(mode=self._settings.value("plot_region_values_display_mode", "value"))
 
-        self.toggle_bookmarks(
-            hide=not self._settings.value("plot_bookmarks", False, type=bool)
-        )
+        self.toggle_bookmarks(hide=not self._settings.value("plot_bookmarks", False, type=bool))
         self.hide_axes(hide=self._settings.value("plot_hide_axes", False, type=bool))
         self.set_locked(locked=self._settings.value("plot_locked", False, type=bool))
 
@@ -1978,9 +1812,7 @@ class Plot(QtWidgets.QWidget):
                 ranges = copy_ranges(info["ranges"])
                 for range_info in ranges:
                     range_info["font_color"] = fn.mkColor(range_info["font_color"])
-                    range_info["background_color"] = fn.mkColor(
-                        range_info["background_color"]
-                    )
+                    range_info["background_color"] = fn.mkColor(range_info["background_color"])
 
                 if info.get("type", "channel") == "group":
                     item = ChannelsTreeItem(
@@ -1993,9 +1825,7 @@ class Plot(QtWidgets.QWidget):
                     children.append(item)
                     item.set_ranges(ranges)
 
-                    groups.extend(
-                        add_new_items(tree, item, info["channels"], items_pool)
-                    )
+                    groups.extend(add_new_items(tree, item, info["channels"], items_pool))
                     groups.append((item, info))
 
                 else:
@@ -2032,9 +1862,7 @@ class Plot(QtWidgets.QWidget):
                 invalid_indexes = invalid_indexes[:10] + 1
                 idx = invalid_indexes[0]
                 ts = channel.timestamps[idx - 1 : idx + 2]
-                invalid.append(
-                    f"{channel.name} @ index {invalid_indexes[:10] - 1} with first time stamp error: {ts}"
-                )
+                invalid.append(f"{channel.name} @ index {invalid_indexes[:10] - 1} with first time stamp error: {ts}")
                 if len(np.argwhere(diff < 0).ravel()):
                     can_trim = False
 
@@ -2046,7 +1874,7 @@ class Plot(QtWidgets.QWidget):
             except:
                 title = "plot window"
 
-            QtWidgets.QMessageBox.warning(
+            MessageBox.warning(
                 self,
                 f"Channels with corrupted time stamps added to {title}",
                 f"The following channels do not have monotonous increasing time stamps:\n{errors}",
@@ -2061,7 +1889,7 @@ class Plot(QtWidgets.QWidget):
                 if samples.dtype.kind not in "SUV" and np.all(np.isnan(samples)):
                     invalid.append(channel.name)
                 elif channel.conversion:
-                    samples = channel.physical().samples
+                    samples = channel.physical(copy=False).samples
                     if samples.dtype.kind not in "SUV" and np.all(np.isnan(samples)):
                         invalid.append(channel.name)
                     else:
@@ -2072,7 +1900,7 @@ class Plot(QtWidgets.QWidget):
                 valid[uuid] = channel
 
         if invalid:
-            QtWidgets.QMessageBox.warning(
+            MessageBox.warning(
                 self,
                 "All NaN channels will not be plotted:",
                 f"The following channels have all NaN samples and will not be plotted:\n{', '.join(invalid)}",
@@ -2084,13 +1912,9 @@ class Plot(QtWidgets.QWidget):
 
         enforce_y_axis = False
         iterator = QtWidgets.QTreeWidgetItemIterator(self.channel_selection)
-        while True:
-            item = iterator.value()
-            if item is None:
-                break
-
+        while item := iterator.value():
             if item.type() == item.Channel:
-                if item.checkState(item.CommonAxisColumn) == QtCore.Qt.Unchecked:
+                if item.checkState(item.CommonAxisColumn) == QtCore.Qt.CheckState.Unchecked:
                     enforce_y_axis = False
                     break
                 else:
@@ -2116,13 +1940,13 @@ class Plot(QtWidgets.QWidget):
             sig.mode = description.get("mode", "phys")
 
             if "comment" in description:
-                sig.comment = description["comment"]
+                sig.comment = description["comment"] or ""
                 sig.flags |= Signal.Flags.user_defined_comment
 
             item = ChannelsTreeItem(
                 ChannelsTreeItem.Channel,
                 signal=sig,
-                check=QtCore.Qt.Checked if sig.enable else QtCore.Qt.Unchecked,
+                check=QtCore.Qt.CheckState.Checked if sig.enable else QtCore.Qt.CheckState.Unchecked,
                 background_color=background_color,
             )
 
@@ -2179,18 +2003,16 @@ class Plot(QtWidgets.QWidget):
                     if item.pattern:
                         item.setCheckState(
                             item.NameColumn,
-                            QtCore.Qt.Checked
-                            if info["enabled"]
-                            else QtCore.Qt.Unchecked,
+                            QtCore.Qt.CheckState.Checked if info["enabled"] else QtCore.Qt.CheckState.Unchecked,
                         )
                     else:
                         if not item.childCount():
                             item.setCheckState(
                                 item.NameColumn,
-                                QtCore.Qt.Checked
-                                if info["enabled"]
-                                else QtCore.Qt.Unchecked,
+                                QtCore.Qt.CheckState.Checked if info["enabled"] else QtCore.Qt.CheckState.Unchecked,
                             )
+                    if info.get("disabled", False):
+                        item.set_disabled(info["disabled"])
 
                 self.channel_selection.blockSignals(False)
                 self.channel_selection.refresh()
@@ -2208,10 +2030,7 @@ class Plot(QtWidgets.QWidget):
                 if destination.type() == ChannelsTreeItem.Group:
                     destination.addChildren(children)
                 else:
-                    parent = (
-                        destination.parent()
-                        or self.channel_selection.invisibleRootItem()
-                    )
+                    parent = destination.parent() or self.channel_selection.invisibleRootItem()
                     index = parent.indexOfChild(destination)
                     parent.insertChildren(index, children)
 
@@ -2221,7 +2040,7 @@ class Plot(QtWidgets.QWidget):
             if description:
                 individual_axis = description.get("individual_axis", False)
                 if individual_axis:
-                    item.setCheckState(item.IndividualAxisColumn, QtCore.Qt.Checked)
+                    item.setCheckState(item.IndividualAxisColumn, QtCore.Qt.CheckState.Checked)
 
                     _, idx = self.plot.signal_by_uuid(sig_uuid)
                     axis = self.plot.get_axis(idx)
@@ -2229,7 +2048,7 @@ class Plot(QtWidgets.QWidget):
                         axis.setWidth(description["individual_axis_width"])
 
                 if description.get("common_axis", False):
-                    item.setCheckState(item.CommonAxisColumn, QtCore.Qt.Checked)
+                    item.setCheckState(item.CommonAxisColumn, QtCore.Qt.CheckState.Checked)
 
                 item.precision = description.get("precision", 3)
 
@@ -2238,8 +2057,11 @@ class Plot(QtWidgets.QWidget):
                     item.signal.flags |= Signal.Flags.user_defined_conversion
                     item.set_conversion(conversion)
 
+                if description.get("user_defined_name", None):
+                    item.name = description["user_defined_name"]
+
             if enforce_y_axis:
-                item.setCheckState(item.CommonAxisColumn, QtCore.Qt.Checked)
+                item.setCheckState(item.CommonAxisColumn, QtCore.Qt.CheckState.Checked)
 
         if update:
             self.channel_selection.update_channel_groups_count()
@@ -2255,17 +2077,10 @@ class Plot(QtWidgets.QWidget):
         size = sum(self.splitter.sizes())
 
         if Plot.dynamic_columns_width or initial:
-            self.channel_selection.resizeColumnToContents(
-                self.channel_selection.NameColumn
-            )
-            self.channel_selection.resizeColumnToContents(
-                self.channel_selection.UnitColumn
-            )
+            self.channel_selection.resizeColumnToContents(self.channel_selection.NameColumn)
+            self.channel_selection.resizeColumnToContents(self.channel_selection.UnitColumn)
 
-        width = sum(
-            self.channel_selection.columnWidth(col)
-            for col in range(self.channel_selection.columnCount())
-        )
+        width = sum(self.channel_selection.columnWidth(col) for col in range(self.channel_selection.columnCount()))
 
         if width > self.splitter.sizes()[0]:
             if size - width >= 300:
@@ -2300,7 +2115,7 @@ class Plot(QtWidgets.QWidget):
         channel_group = {
             "type": "group",
             "name": widget.name,
-            "enabled": item.checkState(item.NameColumn) == QtCore.Qt.Checked,
+            "enabled": item.checkState(item.NameColumn) == QtCore.Qt.CheckState.Checked,
             "pattern": pattern,
             "ranges": ranges,
             "origin_uuid": item.origin_uuid,
@@ -2317,20 +2132,23 @@ class Plot(QtWidgets.QWidget):
 
         sig, idx = self.plot.signal_by_uuid(widget.uuid)
 
-        channel["name"] = sig.name
+        if sig.flags & Signal.Flags.user_defined_name:
+            channel["user_defined_name"] = sig.name
+            channel["name"] = sig.original_name
+        else:
+            channel["name"] = sig.name
+
         channel["unit"] = sig.unit
         channel["flags"] = int(sig.flags)
-        channel["enabled"] = item.checkState(item.NameColumn) == QtCore.Qt.Checked
+        channel["enabled"] = item.checkState(item.NameColumn) == QtCore.Qt.CheckState.Checked
 
-        if item.checkState(item.IndividualAxisColumn) == QtCore.Qt.Checked:
+        if item.checkState(item.IndividualAxisColumn) == QtCore.Qt.CheckState.Checked:
             channel["individual_axis"] = True
             channel["individual_axis_width"] = self.plot.get_axis(idx).width()
         else:
             channel["individual_axis"] = False
 
-        channel["common_axis"] = (
-            item.checkState(item.CommonAxisColumn) == QtCore.Qt.Checked
-        )
+        channel["common_axis"] = item.checkState(item.CommonAxisColumn) == QtCore.Qt.CheckState.Checked
         channel["color"] = sig.color.name()
         channel["computed"] = bool(sig.flags & Signal.Flags.computed)
         channel["ranges"] = copy_ranges(widget.ranges)
@@ -2361,12 +2179,21 @@ class Plot(QtWidgets.QWidget):
         return channel
 
     def channel_selection_changed(self, update=False):
+        def set_focused(item):
+            if item.type() == item.Channel:
+                item.signal.enable = True
+
+            elif item.type() == item.Group:
+                for i in range(item.childCount()):
+                    set_focused(item.child(i))
+
         if self.focused_mode:
             for signal in self.plot.signals:
                 signal.enable = False
+
             for item in self.channel_selection.selectedItems():
-                if item.type() == item.Channel:
-                    item.signal.enable = True
+                set_focused(item)
+
             self.plot.update()
         else:
             if update:
@@ -2374,14 +2201,10 @@ class Plot(QtWidgets.QWidget):
                     signal.enable = False
 
                 iterator = QtWidgets.QTreeWidgetItemIterator(self.channel_selection)
-                while True:
-                    item = iterator.value()
-                    if item is None:
-                        break
-
+                while item := iterator.value():
                     if (
                         item.type() == item.Channel
-                        and item.checkState(item.NameColumn) == QtCore.Qt.Checked
+                        and item.checkState(item.NameColumn) == QtCore.Qt.CheckState.Checked
                         and not item.isDisabled()
                     ):
                         item.signal.enable = True
@@ -2397,12 +2220,13 @@ class Plot(QtWidgets.QWidget):
             palette = self.selected_channel_value.palette()
 
             brush = QtGui.QBrush(item.foreground(item.NameColumn))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.WindowText, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.WindowText, brush)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.WindowText, brush)
 
             brush = QtGui.QBrush(item.background(item.NameColumn))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Window, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.Window, brush)
 
             self.selected_channel_value.setPalette(palette)
 
@@ -2412,13 +2236,13 @@ class Plot(QtWidgets.QWidget):
             metrics = QtGui.QFontMetrics(self.selected_channel_value.font())
             elided = metrics.elidedText(
                 f"{value} {unit}",
-                QtCore.Qt.ElideRight,
+                QtCore.Qt.TextElideMode.ElideRight,
                 self.selected_channel_value.width() - 10,
             )
 
             self.selected_channel_value.setText(elided)  # (f"{value} {unit}")
 
-        if QtCore.Qt.CheckStateRole not in roles:
+        if QtCore.Qt.ItemDataRole.CheckStateRole not in roles:
             return
 
         if item.type() != item.Channel or item.isDisabled():
@@ -2427,20 +2251,22 @@ class Plot(QtWidgets.QWidget):
         column = top_left.column()
 
         if column == item.NameColumn:
-            enabled = item.checkState(column) == QtCore.Qt.Checked
+            enabled = item.checkState(column) == QtCore.Qt.CheckState.Checked
             if enabled != item.signal.enable:
                 item.signal.enable = enabled
                 self.plot.set_signal_enable(item.uuid, item.checkState(column))
+            if not enabled and self.channel_selection.hide_disabled_channels:
+                item.setHidden(True)
 
         elif column == item.CommonAxisColumn:
             if not self.locked:
-                enabled = item.checkState(column) == QtCore.Qt.Checked
+                enabled = item.checkState(column) == QtCore.Qt.CheckState.Checked
                 if enabled != item.signal.y_link:
                     item.signal.y_link = enabled
                     self.plot.set_common_axis(item.uuid, enabled)
 
         elif column == item.IndividualAxisColumn:
-            enabled = item.checkState(column) == QtCore.Qt.Checked
+            enabled = item.checkState(column) == QtCore.Qt.CheckState.Checked
             if enabled != item.signal.individual_axis:
                 self.plot.set_individual_axis(item.uuid, enabled)
 
@@ -2451,16 +2277,13 @@ class Plot(QtWidgets.QWidget):
         elif item.type() != item.Info:
             if item.type() == item.Channel:
                 if not item.isDisabled():
-                    if item.checkState(item.NameColumn) == QtCore.Qt.Checked:
-                        item.setCheckState(item.NameColumn, QtCore.Qt.Unchecked)
+                    if item.checkState(item.NameColumn) == QtCore.Qt.CheckState.Checked:
+                        item.setCheckState(item.NameColumn, QtCore.Qt.CheckState.Unchecked)
                     else:
-                        item.setCheckState(item.NameColumn, QtCore.Qt.Checked)
+                        item.setCheckState(item.NameColumn, QtCore.Qt.CheckState.Checked)
             elif item.type() == item.Group:
                 if (
-                    (
-                        Plot.item_double_click_handling == "enable/disable"
-                        and button == QtCore.Qt.MouseButton.LeftButton
-                    )
+                    (Plot.item_double_click_handling == "enable/disable" and button == QtCore.Qt.MouseButton.LeftButton)
                     or Plot.item_double_click_handling == "expand/collapse"
                     and button == QtCore.Qt.MouseButton.RightButton
                 ):
@@ -2468,10 +2291,8 @@ class Plot(QtWidgets.QWidget):
                         self.channel_selection.setExpandsOnDoubleClick(False)
                     if item.isDisabled():
                         item.set_disabled(False)
-                        item.setIcon(item.NameColumn, QtGui.QIcon(":/open.png"))
                     else:
                         item.set_disabled(True)
-                        item.setIcon(item.NameColumn, QtGui.QIcon(":/erase.png"))
                     self.plot.update()
                 else:
                     item.setExpanded(not item.isExpanded())
@@ -2491,6 +2312,7 @@ class Plot(QtWidgets.QWidget):
 
         if not count:
             self.info_uuid = None
+            self.info.set_stats(None)
             self.selected_channel_value.setText("")
             self.close_request.emit()
 
@@ -2512,11 +2334,11 @@ class Plot(QtWidgets.QWidget):
 
     def clear(self):
         event = QtGui.QKeyEvent(
-            QtCore.QEvent.KeyPress, QtCore.Qt.Key_A, QtCore.Qt.ControlModifier
+            QtCore.QEvent.Type.KeyPress, QtCore.Qt.Key.Key_A, QtCore.Qt.KeyboardModifier.ControlModifier
         )
         self.channel_selection.keyPressEvent(event)
         event = QtGui.QKeyEvent(
-            QtCore.QEvent.KeyPress, QtCore.Qt.Key_Delete, QtCore.Qt.NoModifier
+            QtCore.QEvent.Type.KeyPress, QtCore.Qt.Key.Key_Delete, QtCore.Qt.KeyboardModifier.NoModifier
         )
         self.channel_selection.keyPressEvent(event)
 
@@ -2531,11 +2353,7 @@ class Plot(QtWidgets.QWidget):
         tree = self.channel_selection
         tree.plot = None
         iterator = QtWidgets.QTreeWidgetItemIterator(tree)
-        while True:
-            item = iterator.value()
-            if item is None:
-                break
-
+        while item := iterator.value():
             item.signal = None
 
             iterator += 1
@@ -2601,8 +2419,9 @@ class Plot(QtWidgets.QWidget):
             palette = self.selected_channel_value.palette()
             sig, idx = self.plot.signal_by_uuid(uuid)
             brush = QtGui.QBrush(sig.color)
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.WindowText, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.WindowText, brush)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.WindowText, brush)
             self.selected_channel_value.setPalette(palette)
 
             item = self.item_by_uuid(uuid)
@@ -2612,7 +2431,7 @@ class Plot(QtWidgets.QWidget):
                 metrics = QtGui.QFontMetrics(self.selected_channel_value.font())
                 elided = metrics.elidedText(
                     f"{value} {unit}",
-                    QtCore.Qt.ElideRight,
+                    QtCore.Qt.TextElideMode.ElideRight,
                     self.selected_channel_value.width() - 10,
                 )
 
@@ -2648,13 +2467,11 @@ class Plot(QtWidgets.QWidget):
                         metrics = QtGui.QFontMetrics(self.selected_channel_value.font())
                         elided = metrics.elidedText(
                             f"{value} {unit}",
-                            QtCore.Qt.ElideRight,
+                            QtCore.Qt.TextElideMode.ElideRight,
                             self.selected_channel_value.width() - 10,
                         )
 
-                        self.selected_channel_value.setText(
-                            elided
-                        )  # (f"{value} {unit}")
+                        self.selected_channel_value.setText(elided)  # (f"{value} {unit}")
 
         if self.info.isVisible():
             stats = self.plot.get_stats(self.info_uuid)
@@ -2683,11 +2500,7 @@ class Plot(QtWidgets.QWidget):
 
     def cursor_removed(self):
         iterator = QtWidgets.QTreeWidgetItemIterator(self.channel_selection)
-        while True:
-            item = iterator.value()
-            if item is None:
-                break
-
+        while item := iterator.value():
             if item.type() == item.Channel and not self.plot.region:
                 self.cursor_info.update_value()
                 item.set_prefix()
@@ -2703,11 +2516,7 @@ class Plot(QtWidgets.QWidget):
 
     def curve_clicked(self, uuid):
         iterator = QtWidgets.QTreeWidgetItemIterator(self.channel_selection)
-        while True:
-            item = iterator.value()
-            if item is None:
-                break
-
+        while item := iterator.value():
             if item.type() == item.Channel and item.uuid == uuid:
                 self.channel_selection.clearSelection()
                 self.channel_selection.setCurrentItem(item)
@@ -2742,7 +2551,7 @@ class Plot(QtWidgets.QWidget):
                 super().dropEvent(e)
 
     def flash_curve(self, item, column):
-        self.plot.flash_current_signal = 4
+        self.plot.flash_current_signal = 6
         self.plot.update()
 
     def hide_axes(self, event=None, hide=None):
@@ -2761,6 +2570,14 @@ class Plot(QtWidgets.QWidget):
             self.hide_axes_btn.setFlat(False)
             self.hide_axes_btn.setToolTip("Hide axes")
 
+        if hide:
+            png = ":/axis.png"
+        else:
+            png = ":/axis_on.png"
+        icon = QtGui.QIcon()
+        icon.addPixmap(QtGui.QPixmap(png), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
+        self.hide_axes_btn.setIcon(icon)
+
     def hide_selected_channel_value(self, event=None, hide=None):
         if hide is None:
             hide = not self.selected_channel_value_btn.isFlat()
@@ -2769,15 +2586,19 @@ class Plot(QtWidgets.QWidget):
         if hide:
             self.selected_channel_value.hide()
             self.selected_channel_value_btn.setFlat(True)
-            self.selected_channel_value_btn.setToolTip(
-                "Show selected channel value panel"
-            )
+            self.selected_channel_value_btn.setToolTip("Show selected channel value panel")
         else:
             self.selected_channel_value.show()
             self.selected_channel_value_btn.setFlat(False)
-            self.selected_channel_value_btn.setToolTip(
-                "Hide selected channel value panel"
-            )
+            self.selected_channel_value_btn.setToolTip("Hide selected channel value panel")
+
+        if hide:
+            png = ":/number.png"
+        else:
+            png = ":/number_on.png"
+        icon = QtGui.QIcon()
+        icon.addPixmap(QtGui.QPixmap(png), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
+        self.selected_channel_value_btn.setIcon(icon)
 
     def increase_font(self):
         font = self.font()
@@ -2805,7 +2626,8 @@ class Plot(QtWidgets.QWidget):
         key = event.key()
         modifiers = event.modifiers()
 
-        if key == QtCore.Qt.Key_M and modifiers == QtCore.Qt.NoModifier:
+        if key == QtCore.Qt.Key.Key_M and modifiers == QtCore.Qt.KeyboardModifier.NoModifier:
+            event.accept()
             ch_size, plt_size, info_size = self.splitter.sizes()
 
             if self.info.isVisible():
@@ -2822,10 +2644,11 @@ class Plot(QtWidgets.QWidget):
                     )
                 )
 
-                stats = self.plot.get_stats(self.info_uuid)
-                self.info.set_stats(stats)
+                if self.info_uuid:
+                    stats = self.plot.get_stats(self.info_uuid)
+                    self.info.set_stats(stats)
 
-        elif key == QtCore.Qt.Key_2 and modifiers == QtCore.Qt.NoModifier:
+        elif key == QtCore.Qt.Key.Key_2 and modifiers == QtCore.Qt.KeyboardModifier.NoModifier:
             self.focused_mode = not self.focused_mode
             if self.focused_mode:
                 self.focused_mode_btn.setFlat(False)
@@ -2833,19 +2656,21 @@ class Plot(QtWidgets.QWidget):
                 self.focused_mode_btn.setFlat(True)
             self.channel_selection_changed(update=True)
 
-        elif (
-            key in (QtCore.Qt.Key_B, QtCore.Qt.Key_H, QtCore.Qt.Key_P, QtCore.Qt.Key_T)
-            and modifiers == QtCore.Qt.ControlModifier
-        ):
-            selected_items = self.channel_selection.selectedItems() or (
-                self.channel_selection.invisibleRootItem(),
-            )
+            event.accept()
 
-            if key == QtCore.Qt.Key_B:
+        elif (
+            key in (QtCore.Qt.Key.Key_B, QtCore.Qt.Key.Key_H, QtCore.Qt.Key.Key_P, QtCore.Qt.Key.Key_T)
+            and modifiers == QtCore.Qt.KeyboardModifier.ControlModifier
+        ):
+            selected_items = self.channel_selection.selectedItems() or [
+                self.channel_selection.topLevelItem(i) for i in range(self.channel_selection.topLevelItemCount())
+            ]
+
+            if key == QtCore.Qt.Key.Key_B:
                 fmt = "bin"
-            elif key == QtCore.Qt.Key_H:
+            elif key == QtCore.Qt.Key.Key_H:
                 fmt = "hex"
-            elif key == QtCore.Qt.Key_P:
+            elif key == QtCore.Qt.Key.Key_P:
                 fmt = "phys"
             else:
                 fmt = "ascii"
@@ -2893,9 +2718,11 @@ class Plot(QtWidgets.QWidget):
             self.current_uuid_changed(self.plot.current_uuid)
             self.plot.update()
 
+            event.accept()
+
         elif (
-            key in (QtCore.Qt.Key_R, QtCore.Qt.Key_S)
-            and modifiers == QtCore.Qt.AltModifier
+            key in (QtCore.Qt.Key.Key_R, QtCore.Qt.Key.Key_S)
+            and modifiers == QtCore.Qt.KeyboardModifier.AltModifier
             and self._can_switch_mode
         ):
             selected_items = self.channel_selection.selectedItems()
@@ -2904,22 +2731,18 @@ class Plot(QtWidgets.QWidget):
                 uuids = [sig.uuid for sig in self.plot.signals]
 
             else:
-                uuids = [
-                    item.uuid
-                    for item in selected_items
-                    if item.type() == ChannelsTreeItem.Channel
-                ]
+                uuids = [item.uuid for item in selected_items if item.type() == ChannelsTreeItem.Channel]
 
                 signals = [self.plot.signal_by_uuid(uuid) for uuid in uuids]
 
             if signals:
-                if key == QtCore.Qt.Key_R:
+                if key == QtCore.Qt.Key.Key_R:
                     mode = "raw"
-                    style = QtCore.Qt.DashLine
+                    style = QtCore.Qt.PenStyle.DashLine
 
                 else:
                     mode = "phys"
-                    style = QtCore.Qt.SolidLine
+                    style = QtCore.Qt.PenStyle.SolidLine
 
                 for signal, idx in signals:
                     if signal.mode != mode:
@@ -2961,9 +2784,7 @@ class Plot(QtWidgets.QWidget):
                             self.plot.y_axis.mode = mode
                             self.plot.y_axis.picture = None
                             self.plot.y_axis.update()
-                            self.plot.viewbox.setYRange(
-                                buttom, top, padding=0, update=True
-                            )
+                            self.plot.viewbox.setYRange(buttom, top, padding=0, update=True)
 
                         self.plot.get_axis(idx).mode = mode
                         self.plot.get_axis(idx).picture = None
@@ -2978,7 +2799,9 @@ class Plot(QtWidgets.QWidget):
             if self.plot.cursor1:
                 self.plot.cursor_moved.emit(self.plot.cursor1)
 
-        elif key == QtCore.Qt.Key_I and modifiers == QtCore.Qt.ControlModifier:
+            event.accept()
+
+        elif key == QtCore.Qt.Key.Key_I and modifiers == QtCore.Qt.KeyboardModifier.ControlModifier:
             if self.plot.cursor1:
                 position = self.plot.cursor1.value()
                 comment, submit = QtWidgets.QInputDialog.getMultiLineText(
@@ -2997,7 +2820,7 @@ class Plot(QtWidgets.QWidget):
                         pos=position,
                         message=comment,
                         color="#FF0000",
-                        tool=Bookmark.tool,
+                        tool=Tool.__tool__,
                     )
                     bookmark.visible = visible
                     bookmark.edited = True
@@ -3010,7 +2833,9 @@ class Plot(QtWidgets.QWidget):
 
                     self.update()
 
-        elif key == QtCore.Qt.Key_I and modifiers == QtCore.Qt.AltModifier:
+            event.accept()
+
+        elif key == QtCore.Qt.Key.Key_I and modifiers == QtCore.Qt.KeyboardModifier.AltModifier:
             self.show_bookmarks = not self.show_bookmarks
             if self.show_bookmarks:
                 self.bookmark_btn.setFlat(False)
@@ -3021,12 +2846,11 @@ class Plot(QtWidgets.QWidget):
                 bookmark.visible = self.show_bookmarks
 
             self.plot.update()
+            event.accept()
 
-        elif key == QtCore.Qt.Key_G and modifiers == QtCore.Qt.ControlModifier:
+        elif key == QtCore.Qt.Key.Key_G and modifiers == QtCore.Qt.KeyboardModifier.ControlModifier:
             selected_items = [
-                item
-                for item in self.channel_selection.selectedItems()
-                if item.type() == ChannelsTreeItem.Channel
+                item for item in self.channel_selection.selectedItems() if item.type() == ChannelsTreeItem.Channel
             ]
 
             if selected_items:
@@ -3061,13 +2885,11 @@ class Plot(QtWidgets.QWidget):
 
                     self.plot.update()
 
-        elif key == QtCore.Qt.Key_R and modifiers == QtCore.Qt.NoModifier:
-            iterator = QtWidgets.QTreeWidgetItemIterator(self.channel_selection)
-            while True:
-                item = iterator.value()
-                if item is None:
-                    break
+            event.accept()
 
+        elif key == QtCore.Qt.Key.Key_R and modifiers == QtCore.Qt.KeyboardModifier.NoModifier:
+            iterator = QtWidgets.QTreeWidgetItemIterator(self.channel_selection)
+            while item := iterator.value():
                 if item.type() == item.Channel:
                     item.set_prefix()
                     item.set_value("")
@@ -3076,34 +2898,30 @@ class Plot(QtWidgets.QWidget):
 
             self.plot.keyPressEvent(event)
 
-        elif key == QtCore.Qt.Key_C and modifiers in (
-            QtCore.Qt.NoModifier,
-            QtCore.Qt.ControlModifier,
-            QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier,
+        elif key == QtCore.Qt.Key.Key_C and modifiers in (
+            QtCore.Qt.KeyboardModifier.NoModifier,
+            QtCore.Qt.KeyboardModifier.ControlModifier,
+            QtCore.Qt.KeyboardModifier.ControlModifier | QtCore.Qt.KeyboardModifier.ShiftModifier,
         ):
             self.channel_selection.keyPressEvent(event)
 
         elif (
-            key == QtCore.Qt.Key_R
-            and modifiers == QtCore.Qt.ControlModifier
+            key == QtCore.Qt.Key.Key_R
+            and modifiers == QtCore.Qt.KeyboardModifier.ControlModifier
             and self.can_edit_ranges
         ):
             self.channel_selection.keyPressEvent(event)
 
-        elif key == QtCore.Qt.Key_V and modifiers in (
-            QtCore.Qt.ControlModifier,
-            QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier,
+        elif key == QtCore.Qt.Key.Key_V and modifiers in (
+            QtCore.Qt.KeyboardModifier.ControlModifier,
+            QtCore.Qt.KeyboardModifier.ControlModifier | QtCore.Qt.KeyboardModifier.ShiftModifier,
         ):
             self.channel_selection.keyPressEvent(event)
 
-        elif (
-            key == QtCore.Qt.Key_BracketLeft and modifiers == QtCore.Qt.ControlModifier
-        ):
+        elif key == QtCore.Qt.Key.Key_BracketLeft and modifiers == QtCore.Qt.KeyboardModifier.ControlModifier:
             self.decrease_font()
 
-        elif (
-            key == QtCore.Qt.Key_BracketRight and modifiers == QtCore.Qt.ControlModifier
-        ):
+        elif key == QtCore.Qt.Key.Key_BracketRight and modifiers == QtCore.Qt.KeyboardModifier.ControlModifier:
             self.increase_font()
 
         elif event.keyCombination().toCombined() in self.plot.keyboard_events:
@@ -3112,24 +2930,41 @@ class Plot(QtWidgets.QWidget):
             except:
                 print(format_exc())
 
-        elif key == QtCore.Qt.Key_Backspace:
-            if modifiers == QtCore.Qt.ShiftModifier:
+        elif key == QtCore.Qt.Key.Key_Backspace:
+            if modifiers == QtCore.Qt.KeyboardModifier.ShiftModifier:
                 self.redo_zoom()
             else:
                 self.undo_zoom()
 
+            event.accept()
+
+        elif key == QtCore.Qt.Key.Key_W and modifiers == QtCore.Qt.KeyboardModifier.ShiftModifier:
+            if self.enable_zoom_history and self.zoom_history:
+                self.zoom_history_index = 0
+
+                snapshot = self.zoom_history[self.zoom_history_index]
+
+                self.plot.block_zoom_signal = True
+
+                for sig in self.plot.signals:
+                    y_range = snapshot["y"].get(sig.uuid, None)
+
+                    if y_range is None:
+                        continue
+
+                    self.plot.set_y_range(sig.uuid, y_range, emit=False)
+
+                self.plot.viewbox.setXRange(*snapshot["x"], padding=0)
+
+                self.undo_btn.setEnabled(False)
+                if len(self.zoom_history) > 1:
+                    self.redo_btn.setEnabled(True)
+
+                self.plot.block_zoom_signal = False
+
+            event.accept()
         else:
-            super().keyPressEvent(event)
-
-    @property
-    def line_width(self):
-        return self.plot.line_width
-
-    @line_width.setter
-    def line_width(self, value):
-        self.plot.line_width = value
-        self.plot.dot_width = value + 4
-        self.plot.update()
+            event.ignore()
 
     def mousePressEvent(self, event):
         self.clicked.emit()
@@ -3150,8 +2985,11 @@ class Plot(QtWidgets.QWidget):
             if item.type() == item.Channel:
                 signal, i = self.plot.signal_by_uuid(item.uuid)
 
-                start_v, kind, fmt = signal.value_at_timestamp(start)
-                stop_v, kind, fmt = signal.value_at_timestamp(stop)
+                index = self.plot.get_timestamp_index(start, signal.timestamps)
+                start_v, kind, fmt = signal.value_at_index(index)
+
+                index = self.plot.get_timestamp_index(stop, signal.timestamps)
+                stop_v, kind, fmt = signal.value_at_index(index)
 
                 if self.region_values_display_mode == "delta":
                     item.set_prefix("Δ = ")
@@ -3270,11 +3108,7 @@ class Plot(QtWidgets.QWidget):
     def range_removed(self):
         self._prev_region = None
         iterator = QtWidgets.QTreeWidgetItemIterator(self.channel_selection)
-        while True:
-            item = iterator.value()
-            if item is None:
-                break
-
+        while item := iterator.value():
             if item.type() == item.Channel:
                 item.set_prefix()
                 item.set_value("")
@@ -3293,9 +3127,7 @@ class Plot(QtWidgets.QWidget):
 
     def redo_zoom(self):
         if self.enable_zoom_history and self.zoom_history:
-            self.zoom_history_index = min(
-                self.zoom_history_index + 1, len(self.zoom_history) - 1
-            )
+            self.zoom_history_index = min(self.zoom_history_index + 1, len(self.zoom_history) - 1)
 
             snapshot = self.zoom_history[self.zoom_history_index]
 
@@ -3330,6 +3162,11 @@ class Plot(QtWidgets.QWidget):
         self.plot.y_axis.set_font_size(size)
         self.plot.x_axis.set_font_size(size)
 
+    def set_initial_zoom(self):
+        self.zoom_history.clear()
+        self.zoom_history_index = -1
+        self.zoom_changed(inplace=True)
+
     def set_locked(self, event=None, locked=None):
         if locked is None:
             locked = not self.locked
@@ -3343,18 +3180,15 @@ class Plot(QtWidgets.QWidget):
             tooltip = "The Y axis is unlocked. Press to lock"
             png = ":/unlocked.png"
             self.lock_btn.setFlat(False)
+        icon = QtGui.QIcon()
+        icon.addPixmap(QtGui.QPixmap(png), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
+        self.lock_btn.setToolTip(tooltip)
+        self.lock_btn.setIcon(icon)
 
-        self.channel_selection.setColumnHidden(
-            self.channel_selection.CommonAxisColumn, locked
-        )
+        self.channel_selection.setColumnHidden(self.channel_selection.CommonAxisColumn, locked)
 
         self.locked = locked
         self.plot.set_locked(locked)
-
-        icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(png), QtGui.QIcon.Normal, QtGui.QIcon.Off)
-        self.lock_btn.setToolTip(tooltip)
-        self.lock_btn.setIcon(icon)
 
     def set_splitter(self, pos, index):
         self.splitter_moved.emit(self, pos)
@@ -3362,9 +3196,9 @@ class Plot(QtWidgets.QWidget):
     def set_timestamp(self, stamp):
         if self.plot.cursor1 is None:
             event = QtGui.QKeyEvent(
-                QtCore.QEvent.KeyPress,
-                QtCore.Qt.Key_C,
-                QtCore.Qt.NoModifier,
+                QtCore.QEvent.Type.KeyPress,
+                QtCore.Qt.Key.Key_C,
+                QtCore.Qt.KeyboardModifier.NoModifier,
             )
             self.plot.keyPressEvent(event)
 
@@ -3404,9 +3238,7 @@ class Plot(QtWidgets.QWidget):
 
                         for range_info in ranges:
                             range_info["font_color"] = range_info["font_color"].name()
-                            range_info["background_color"] = range_info[
-                                "background_color"
-                            ].name()
+                            range_info["background_color"] = range_info["background_color"].name()
 
                         pattern["ranges"] = ranges
 
@@ -3414,14 +3246,10 @@ class Plot(QtWidgets.QWidget):
 
                     for range_info in ranges:
                         range_info["font_color"] = range_info["font_color"].name()
-                        range_info["background_color"] = range_info[
-                            "background_color"
-                        ].name()
+                        range_info["background_color"] = range_info["background_color"].name()
 
                     channel = self.channel_group_item_to_config(item)
-                    channel["channels"] = (
-                        item_to_config(tree, item) if item.pattern is None else []
-                    )
+                    channel["channels"] = item_to_config(tree, item) if item.pattern is None else []
 
                 channels.append(channel)
 
@@ -3438,17 +3266,17 @@ class Plot(QtWidgets.QWidget):
             pattern["ranges"] = ranges
 
         config = {
-            "channels": item_to_config(
-                self.channel_selection, self.channel_selection.invisibleRootItem()
-            )
-            if not self.pattern
-            else [],
+            "channels": (
+                item_to_config(self.channel_selection, self.channel_selection.invisibleRootItem())
+                if not self.pattern
+                else []
+            ),
             "pattern": pattern,
             "splitter": [int(e) for e in self.splitter.sizes()[:2]]
             + [
                 0,
             ],
-            "x_range": [float(e) for e in self.plot.viewbox.viewRange()[0]],
+            "x_range": self.plot.viewbox.viewRange()[0],
             "y_axis_width": self.plot.y_axis.width(),
             "grid": [
                 self.plot.plotItem.ctrl.xGridCheck.isChecked(),
@@ -3476,11 +3304,19 @@ class Plot(QtWidgets.QWidget):
             self.show_bookmarks = hide
 
         key_event = QtGui.QKeyEvent(
-            QtCore.QEvent.KeyPress,
-            QtCore.Qt.Key_I,
-            QtCore.Qt.AltModifier,
+            QtCore.QEvent.Type.KeyPress,
+            QtCore.Qt.Key.Key_I,
+            QtCore.Qt.KeyboardModifier.AltModifier,
         )
         self.keyPressEvent(key_event)
+
+        if not self.show_bookmarks:
+            png = ":/bookmark.png"
+        else:
+            png = ":/bookmark_on.png"
+        icon = QtGui.QIcon()
+        icon.addPixmap(QtGui.QPixmap(png), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
+        self.bookmark_btn.setIcon(icon)
 
         if hide is None:
             self._settings.setValue("plot_bookmarks", not self.bookmark_btn.isFlat())
@@ -3491,7 +3327,7 @@ class Plot(QtWidgets.QWidget):
             self.focused_mode = not focused
 
         key_event = QtGui.QKeyEvent(
-            QtCore.QEvent.KeyPress, QtCore.Qt.Key_2, QtCore.Qt.NoModifier
+            QtCore.QEvent.Type.KeyPress, QtCore.Qt.Key.Key_2, QtCore.Qt.KeyboardModifier.NoModifier
         )
         self.keyPressEvent(key_event)
 
@@ -3505,11 +3341,17 @@ class Plot(QtWidgets.QWidget):
             self.focused_mode_btn.setFlat(False)
             self.focused_mode_btn.setToolTip("Switch off focused mode")
 
+        if not self.focused_mode:
+            png = ":/focus.png"
+        else:
+            png = ":/focus_on.png"
+        icon = QtGui.QIcon()
+        icon.addPixmap(QtGui.QPixmap(png), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
+        self.focused_mode_btn.setIcon(icon)
+
     def toggle_region_values_display_mode(self, event=None, mode=None):
         if mode is None:
-            self.region_values_display_mode = (
-                "delta" if self.region_values_display_mode == "value" else "value"
-            )
+            self.region_values_display_mode = "delta" if self.region_values_display_mode == "value" else "value"
         else:
             self.region_values_display_mode = mode
 
@@ -3518,22 +3360,23 @@ class Plot(QtWidgets.QWidget):
             self.delta_btn.setToolTip("Switch to region cursors delta display mode")
         else:
             self.delta_btn.setFlat(False)
-            self.delta_btn.setToolTip(
-                "Switch to active region cursor value display mode"
-            )
+            self.delta_btn.setToolTip("Switch to active region cursor value display mode")
+
+        if self.delta_btn.isFlat():
+            png = ":/delta.png"
+        else:
+            png = ":/delta_on.png"
+        icon = QtGui.QIcon()
+        icon.addPixmap(QtGui.QPixmap(png), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
+        self.delta_btn.setIcon(icon)
 
         if mode is None:
-            self._settings.setValue(
-                "plot_region_values_display_mode", self.region_values_display_mode
-            )
+            self._settings.setValue("plot_region_values_display_mode", self.region_values_display_mode)
 
         self.range_modified()
 
         iterator = QtWidgets.QTreeWidgetItemIterator(self.channel_selection)
-        while True:
-            item = iterator.value()
-            if item is None:
-                break
+        while item := iterator.value():
             if item.type() == ChannelsTreeItem.Channel:
                 item.set_value(update=True, force=True)
 
@@ -3571,30 +3414,27 @@ class Plot(QtWidgets.QWidget):
             self.cursor_moved()
 
     def _update_visibile_entries(self):
-        _item_cache = self._item_cache = {}
-        _visible_entries = self._visible_entries = set()
-        _visible_items = self._visible_items = {}
-        iterator = QtWidgets.QTreeWidgetItemIterator(self.channel_selection)
+        with self.lock:
+            _item_cache = self._item_cache = {}
+            _visible_entries = self._visible_entries = set()
+            _visible_items = self._visible_items = {}
+            iterator = QtWidgets.QTreeWidgetItemIterator(self.channel_selection)
 
-        while True:
-            item = iterator.value()
-            if item is None:
-                break
-            iterator += 1
-            if item.type() == ChannelsTreeItem.Channel:
-                _item_cache[item.uuid] = item
+            while item := iterator.value():
+                iterator += 1
+                if item.type() == ChannelsTreeItem.Channel:
+                    _item_cache[item.uuid] = item
 
-                if (
-                    item.uuid == self.info_uuid
-                    or item.exists
-                    and (
-                        item.checkState(item.NameColumn) == QtCore.Qt.Checked
-                        or item._is_visible
-                    )
-                ):
-                    entry = (item.origin_uuid, item.signal.name, item.uuid)
-                    _visible_entries.add(entry)
-                    _visible_items[entry] = item
+                    if (
+                        item.uuid == self.info_uuid
+                        or item.exists
+                        and (item.checkState(item.NameColumn) == QtCore.Qt.CheckState.Checked or item._is_visible)
+                    ):
+                        entry = (item.origin_uuid, item.signal.name, item.uuid)
+                        _visible_entries.add(entry)
+                        _visible_items[entry] = item
+
+            self.visible_entries_modified = True
 
         if self.plot.cursor1 is not None:
             self.cursor_moved()
@@ -3610,12 +3450,11 @@ class Plot(QtWidgets.QWidget):
             stats = self.plot.get_stats(self.info_uuid)
             self.info.set_stats(stats)
 
+        if not self._inhibit_x_range_changed_signal:
+            self.x_range_changed_signal.emit(self, self.plot.viewbox.viewRange()[0])
+
     def zoom_changed(self, inplace=False):
-        if (
-            self.enable_zoom_history
-            and self.plot.signals
-            and not self.plot.block_zoom_signal
-        ):
+        if self.enable_zoom_history and self.plot.signals and not self.plot.block_zoom_signal:
             snapshot = {
                 "x": self.plot.viewbox.viewRange()[0],
                 "y": {sig.uuid: sig.y_range for sig in self.plot.signals},
@@ -3628,10 +3467,7 @@ class Plot(QtWidgets.QWidget):
                 else:
                     self.zoom_history[self.zoom_history_index] = snapshot
             else:
-                if (
-                    not self.zoom_history
-                    or self.zoom_history[self.zoom_history_index] != snapshot
-                ):
+                if not self.zoom_history or self.zoom_history[self.zoom_history_index] != snapshot:
                     self.zoom_history = self.zoom_history[: self.zoom_history_index + 1]
 
                     self.zoom_history.append(snapshot)
@@ -3642,7 +3478,7 @@ class Plot(QtWidgets.QWidget):
                     self.undo_btn.setEnabled(True)
 
 
-class _Plot(pg.PlotWidget):
+class PlotGraphics(pg.PlotWidget):
     cursor_moved = QtCore.Signal(object)
     cursor_removed = QtCore.Signal()
     range_removed = QtCore.Signal()
@@ -3673,7 +3509,8 @@ class _Plot(pg.PlotWidget):
         **kwargs,
     ):
         events = kwargs.pop("events", [])
-        viewBox = ViewBoxWithCursor()
+        viewBox = ViewBoxWithCursor(plot=self)
+        self.initial_x_range = "adjust"
         super().__init__(viewBox=viewBox)
 
         # del self.plotItem.vb
@@ -3692,12 +3529,9 @@ class _Plot(pg.PlotWidget):
 
         self.plot_parent = plot_parent
 
-        self.setViewportUpdateMode(QtWidgets.QGraphicsView.FullViewportUpdate)
+        self.setViewportUpdateMode(QtWidgets.QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
 
         self.autoFillBackground()
-
-        self.line_width = 1
-        self.dot_width = 4
 
         self._pixmap = None
 
@@ -3705,12 +3539,11 @@ class _Plot(pg.PlotWidget):
 
         self.cursor_unit = "s" if x_axis == "time" else "Hz"
 
-        self.line_interconnect = (
-            line_interconnect if line_interconnect != "line" else ""
-        )
+        self.line_interconnect = line_interconnect if line_interconnect != "line" else ""
 
         self._can_trim = True
         self._can_paint = True
+        self._can_compute_all_timebase = True
         self._can_paint_global = True
         self.mdf = mdf
 
@@ -3792,16 +3625,13 @@ class _Plot(pg.PlotWidget):
             else:
                 color = "black"
 
-            self.cursor1 = Cursor(
-                pos=pos, angle=90, movable=True, pen=color, hoverPen=color
-            )
+            self.cursor1 = Cursor(pos=pos, angle=90, movable=True, pen=color, hoverPen=color)
 
+            self.viewbox.cursor = self.cursor1
             self.viewbox.addItem(self.cursor1, ignoreBounds=True)
 
             self.cursor1.sigPositionChanged.connect(self.cursor_moved.emit)
-            self.cursor1.sigPositionChangeFinished.connect(
-                self.cursor_move_finished.emit
-            )
+            self.cursor1.sigPositionChangeFinished.connect(self.cursor_move_finished.emit)
             self.cursor_move_finished.emit(self.cursor1)
             self.cursor1.show()
         else:
@@ -3811,12 +3641,12 @@ class _Plot(pg.PlotWidget):
         self.viewbox.sigRangeChangedManually.connect(self.y_changed)
 
         self.x_axis = FormatedAxis(
-            "bottom", maxTickLength=5, background=self.backgroundBrush().color()
+            "bottom", maxTickLength=5, background=self.backgroundBrush().color(), linked_signal=(self, None)
         )
 
         if x_axis == "time":
             fmt = self._settings.value("plot_xaxis")
-            if fmt == "seconds":
+            if fmt == "seconds" or not fmt:
                 fmt = "phys"
         else:
             fmt = "phys"
@@ -3824,7 +3654,7 @@ class _Plot(pg.PlotWidget):
         self.x_axis.origin = origin
 
         self.y_axis = FormatedAxis(
-            "left", maxTickLength=-5, background=self.backgroundBrush().color()
+            "left", maxTickLength=-5, background=self.backgroundBrush().color(), linked_signal=(self, None)
         )
         self.y_axis.setWidth(48)
 
@@ -3920,111 +3750,123 @@ class _Plot(pg.PlotWidget):
 
         self._inhibit = False
 
+        self.viewbox.setXRange(0, 10, update=False)
+
         if signals:
             self.add_new_channels(signals)
 
         self.viewbox.sigXRangeChanged.connect(self.xrange_changed.emit)
 
-        self.keyboard_events = set(
-            [
-                QtCore.QKeyCombination(
-                    QtCore.Qt.NoModifier,
-                    QtCore.Qt.Key_F,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.ShiftModifier,
-                    QtCore.Qt.Key_F,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.NoModifier,
-                    QtCore.Qt.Key_G,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.NoModifier,
-                    QtCore.Qt.Key_I,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.NoModifier,
-                    QtCore.Qt.Key_O,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.NoModifier,
-                    QtCore.Qt.Key_X,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.NoModifier,
-                    QtCore.Qt.Key_R,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.ControlModifier,
-                    QtCore.Qt.Key_S,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.NoModifier,
-                    QtCore.Qt.Key_S,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.ShiftModifier,
-                    QtCore.Qt.Key_S,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.NoModifier,
-                    QtCore.Qt.Key_Y,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.NoModifier,
-                    QtCore.Qt.Key_Left,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.NoModifier,
-                    QtCore.Qt.Key_Right,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.ShiftModifier,
-                    QtCore.Qt.Key_Left,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.ShiftModifier,
-                    QtCore.Qt.Key_Right,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.ControlModifier,
-                    QtCore.Qt.Key_Left,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.ControlModifier,
-                    QtCore.Qt.Key_Right,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.ShiftModifier,
-                    QtCore.Qt.Key_Up,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.ShiftModifier,
-                    QtCore.Qt.Key_Down,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.ShiftModifier,
-                    QtCore.Qt.Key_PageUp,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.ShiftModifier,
-                    QtCore.Qt.Key_PageDown,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.NoModifier,
-                    QtCore.Qt.Key_H,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.NoModifier,
-                    QtCore.Qt.Key_W,
-                ).toCombined(),
-                QtCore.QKeyCombination(
-                    QtCore.Qt.NoModifier,
-                    QtCore.Qt.Key_Insert,
-                ).toCombined(),
-            ]
-        )
+        self.keyboard_events = {
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.Key.Key_F,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ShiftModifier,
+                QtCore.Qt.Key.Key_F,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.Key.Key_G,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ShiftModifier,
+                QtCore.Qt.Key.Key_G,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.Key.Key_I,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.Key.Key_O,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ShiftModifier,
+                QtCore.Qt.Key.Key_I,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ShiftModifier,
+                QtCore.Qt.Key.Key_O,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.Key.Key_X,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.Key.Key_R,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ControlModifier,
+                QtCore.Qt.Key.Key_S,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.Key.Key_S,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ShiftModifier,
+                QtCore.Qt.Key.Key_S,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.Key.Key_Y,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.Key.Key_Left,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.Key.Key_Right,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ShiftModifier,
+                QtCore.Qt.Key.Key_Left,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ShiftModifier,
+                QtCore.Qt.Key.Key_Right,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ControlModifier,
+                QtCore.Qt.Key.Key_Left,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ControlModifier,
+                QtCore.Qt.Key.Key_Right,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ShiftModifier,
+                QtCore.Qt.Key.Key_Up,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ShiftModifier,
+                QtCore.Qt.Key.Key_Down,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ShiftModifier,
+                QtCore.Qt.Key.Key_PageUp,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.ShiftModifier,
+                QtCore.Qt.Key.Key_PageDown,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.Key.Key_H,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.Key.Key_W,
+            ).toCombined(),
+            QtCore.QKeyCombination(
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.Key.Key_Insert,
+            ).toCombined(),
+        }
 
         events = events or []
 
@@ -4082,9 +3924,12 @@ class _Plot(pg.PlotWidget):
                     stop_t = max(stop_t, sig.timestamps[-1])
 
             if (start_t, stop_t) != (np.inf, -np.inf):
-                self.viewbox.setXRange(start_t, stop_t, update=False)
-            else:
-                self.viewbox.setXRange(0, 10, update=False)
+                if self.initial_x_range == "adjust":
+                    self.viewbox.setXRange(start_t, stop_t, update=False)
+                else:
+                    delta = self.viewbox.viewRange()[0][1] - self.viewbox.viewRange()[0][0]
+                    stop_t = start_t + delta
+                    self.viewbox.setXRange(start_t, stop_t, padding=0, update=False)
 
         (start, stop), _ = self.viewbox.viewRange()
 
@@ -4092,8 +3937,7 @@ class _Plot(pg.PlotWidget):
         trim_info = start, stop, width
 
         channels = [
-            PlotSignal(sig, i, trim_info=trim_info)
-            for i, sig in enumerate(channels.values(), len(self.signals))
+            PlotSignal(sig, i, trim_info=trim_info) for i, sig in enumerate(channels.values(), len(self.signals))
         ]
 
         self.signals.extend(channels)
@@ -4112,13 +3956,18 @@ class _Plot(pg.PlotWidget):
                 sig.enable = description.get("enabled", True)
                 sig.format = description.get("format", "phys")
 
-            if not sig.empty:
-                if description.get("y_range", None):
-                    sig.y_range = tuple(description["y_range"])
+            y_range = description.get("y_range", None)
+            if y_range:
+                mn, mx = y_range
+                if mn > mx:
+                    y_range = mx, mn
                 else:
-                    sig.y_range = sig.min, sig.max
-            elif description.get("y_range", None):
-                sig.y_range = tuple(description["y_range"])
+                    y_range = tuple(y_range)
+
+                sig.y_range = y_range
+
+            elif not sig.empty:
+                sig.y_range = sig.min, sig.max
 
             self.axes.append(self._axes_layout_pos)
             self._axes_layout_pos += 1
@@ -4128,7 +3977,7 @@ class _Plot(pg.PlotWidget):
 
         if axis_uuid is not None:
             self.set_current_uuid(sig.uuid)
-            if len(self.all_timebase):
+            if len(self.all_timebase) and self.cursor1 is not None:
                 self.cursor1.set_value(self.all_timebase[0])
 
         self.viewbox._matrixNeedsUpdate = True
@@ -4194,9 +4043,7 @@ class _Plot(pg.PlotWidget):
                 break
         else:
             if (
-                QtCore.QKeyCombination(
-                    QtCore.Qt.Key_C, QtCore.Qt.ControlModifier
-                ).toCombined()
+                QtCore.QKeyCombination(QtCore.Qt.Key.Key_C, QtCore.Qt.KeyboardModifier.ControlModifier).toCombined()
                 not in self.disabled_keys
             ):
                 if self.region is not None:
@@ -4205,7 +4052,7 @@ class _Plot(pg.PlotWidget):
                     if self.region_lock is not None:
                         self.region.setRegion((self.region_lock, pos.x()))
                     else:
-                        if modifiers == QtCore.Qt.ControlModifier:
+                        if modifiers == QtCore.Qt.KeyboardModifier.ControlModifier:
                             self.region.setRegion((start, pos.x()))
                         else:
                             self.region.setRegion((pos.x(), stop))
@@ -4216,7 +4063,7 @@ class _Plot(pg.PlotWidget):
                         self.cursor1.sigPositionChangeFinished.emit(self.cursor1)
 
             now = perf_counter()
-            if modifiers == QtCore.Qt.ControlModifier:
+            if modifiers == QtCore.Qt.KeyboardModifier.ControlModifier:
                 self.select_curve(x, y)
             elif now - self.last_click < 0.3:
                 self.select_curve(x, y)
@@ -4228,30 +4075,27 @@ class _Plot(pg.PlotWidget):
         super().close()
 
     def _compute_all_timebase(self):
-        if self._timebase_db:
-            stamps = {id(sig.timestamps): sig.timestamps for sig in self.signals}
+        if self._can_compute_all_timebase:
+            if self._timebase_db:
+                stamps = {id(sig.timestamps): sig.timestamps for sig in self.signals}
 
-            timebases = [
-                timestamps
-                for id_, timestamps in stamps.items()
-                if id_ in self._timebase_db
-            ]
+                timebases = [timestamps for id_, timestamps in stamps.items() if id_ in self._timebase_db]
 
-            count = len(timebases)
+                count = len(timebases)
 
-            if count == 0:
-                new_timebase = np.array([])
-            elif count == 1:
-                new_timebase = timebases[0]
+                if count == 0:
+                    new_timebase = np.array([])
+                elif count == 1:
+                    new_timebase = timebases[0]
+                else:
+                    try:
+                        new_timebase = np.unique(np.concatenate(timebases))
+                    except MemoryError:
+                        new_timebase = reduce(np.union1d, timebases)
+
+                self.all_timebase = self.timebase = new_timebase
             else:
-                try:
-                    new_timebase = np.unique(np.concatenate(timebases))
-                except MemoryError:
-                    new_timebase = reduce(np.union1d, timebases)
-
-            self.all_timebase = self.timebase = new_timebase
-        else:
-            self.all_timebase = self.timebase = np.array([])
+                self.all_timebase = self.timebase = np.array([])
 
     def _cursor_moved(self, event):
         pos = self.plot_item.vb.mapSceneToView(event.scenePos()).x()
@@ -4278,10 +4122,7 @@ class _Plot(pg.PlotWidget):
 
         self.block_zoom_signal = True
 
-        if (
-            zoom_mode in (self.viewbox.Y_zoom, *self.viewbox.XY_zoom)
-            and not self.locked
-        ):
+        if zoom_mode in (self.viewbox.Y_zoom, *self.viewbox.XY_zoom) and not self.locked:
             y1, y2 = sorted([p1.y(), p2.y()])
             y_bottom, y_top = self.viewbox.viewRange()[1]
             r_top = (y2 - y_bottom) / (y_top - y_bottom)
@@ -4369,6 +4210,7 @@ class _Plot(pg.PlotWidget):
         super().dragEnterEvent(e)
 
     def draw_grids(self, paint, event_rect):
+        ratio = self.devicePixelRatio()
         if self.y_axis.grid or self.x_axis.grid:
             rect = self.viewbox.sceneBoundingRect()
             y_delta = rect.y()
@@ -4376,8 +4218,10 @@ class _Plot(pg.PlotWidget):
 
             if self.y_axis.grid and self.y_axis.isVisible():
                 for pen, p1, p2 in self.y_axis.tickSpecs:
-                    y_pos = p1.y() + y_delta
-                    paint.setPen(pen)
+                    pen2 = fn.mkPen(pen)
+                    pen2.setStyle(QtCore.Qt.PenStyle.DashLine)
+                    y_pos = p1.y() / ratio + y_delta
+                    paint.setPen(pen2)
                     paint.drawLine(
                         QtCore.QPointF(0, y_pos),
                         QtCore.QPointF(event_rect.x() + event_rect.width(), y_pos),
@@ -4385,8 +4229,10 @@ class _Plot(pg.PlotWidget):
 
             if self.x_axis.grid and self.x_axis.isVisible():
                 for pen, p1, p2 in self.x_axis.tickSpecs:
-                    x_pos = p1.x() + x_delta
-                    paint.setPen(pen)
+                    pen2 = fn.mkPen(pen)
+                    pen2.setStyle(QtCore.Qt.PenStyle.DashLine)
+                    x_pos = p1.x() / ratio + x_delta
+                    paint.setPen(pen2)
                     paint.drawLine(
                         QtCore.QPointF(x_pos, 0),
                         QtCore.QPointF(x_pos, event_rect.y() + event_rect.height()),
@@ -4453,6 +4299,7 @@ class _Plot(pg.PlotWidget):
                 locked=self.locked,
                 maxTickLength=5,
                 background=self.backgroundBrush().color(),
+                linked_signal=(self, sig.uuid),
             )
             axis.scale_editor_requested.connect(self.open_scale_editor)
             if sig.conversion and hasattr(sig.conversion, "text_0"):
@@ -4480,16 +4327,17 @@ class _Plot(pg.PlotWidget):
             return self.all_timebase
 
     def get_stats(self, uuid):
-        sig, index = self.signal_by_uuid(uuid)
-
-        return sig.get_stats(
-            cursor=self.cursor1.value() if self.cursor1 else None,
-            region=self.region.getRegion() if self.region else None,
-            view_region=self.viewbox.viewRange()[0],
-            precision=self._settings.value(
-                "stats_float_precision", sig.precision, type=int
-            ),
-        )
+        try:
+            sig, index = self.signal_by_uuid(uuid)
+        except KeyError:
+            return {}
+        else:
+            return sig.get_stats(
+                cursor=self.cursor1.value() if self.cursor1 else None,
+                region=self.region.getRegion() if self.region else None,
+                view_region=self.viewbox.viewRange()[0],
+                precision=self._settings.value("stats_float_precision", sig.precision, type=int),
+            )
 
     def get_timestamp_index(self, timestamp, timestamps):
         key = id(timestamps), timestamp
@@ -4514,10 +4362,10 @@ class _Plot(pg.PlotWidget):
     def insert_computation(self, name=""):
         functions = self.plot_parent.owner.functions
         if not functions:
-            QtWidgets.QMessageBox.warning(
+            MessageBox.warning(
                 self,
-                f"Cannot add computed channel",
-                f"There is no user defined function. Create new function using the Functions Manger (F6)",
+                "Cannot add computed channel",
+                "There is no user defined function. Create new function using the Functions Manger (F6)",
             )
             return
 
@@ -4546,10 +4394,10 @@ class _Plot(pg.PlotWidget):
             super().keyPressEvent(event)
         else:
             handled = True
-            if key == QtCore.Qt.Key_Y and modifier == QtCore.Qt.NoModifier:
+            if key == QtCore.Qt.Key.Key_Y and modifier == QtCore.Qt.KeyboardModifier.NoModifier:
                 if self.region is None:
                     event_ = QtGui.QKeyEvent(
-                        QtCore.QEvent.KeyPress, QtCore.Qt.Key_R, QtCore.Qt.NoModifier
+                        QtCore.QEvent.Type.KeyPress, QtCore.Qt.Key.Key_R, QtCore.Qt.KeyboardModifier.NoModifier
                     )
                     self.keyPressEvent(event_)
 
@@ -4566,19 +4414,15 @@ class _Plot(pg.PlotWidget):
 
                 self.update()
 
-            elif key == QtCore.Qt.Key_X and modifier == QtCore.Qt.NoModifier:
+            elif key == QtCore.Qt.Key.Key_X and modifier == QtCore.Qt.KeyboardModifier.NoModifier:
                 if self.region is not None:
                     self.viewbox.setXRange(*self.region.getRegion(), padding=0)
                     event_ = QtGui.QKeyEvent(
-                        QtCore.QEvent.KeyPress, QtCore.Qt.Key_R, QtCore.Qt.NoModifier
+                        QtCore.QEvent.Type.KeyPress, QtCore.Qt.Key.Key_R, QtCore.Qt.KeyboardModifier.NoModifier
                     )
                     self.keyPressEvent(event_)
 
-            elif (
-                key == QtCore.Qt.Key_F
-                and modifier == QtCore.Qt.NoModifier
-                and not self.locked
-            ):
+            elif key == QtCore.Qt.Key.Key_F and modifier == QtCore.Qt.KeyboardModifier.NoModifier and not self.locked:
                 self.block_zoom_signal = True
                 if self.common_axis_items:
                     if any(
@@ -4600,6 +4444,8 @@ class _Plot(pg.PlotWidget):
                                 if len(self.signal_by_uuid(uuid)[0].plot_samples)
                             ]
                         )
+                    else:
+                        common_min, common_max = 0, 1
 
                 for i, signal in enumerate(self.signals):
                     if len(signal.plot_samples):
@@ -4607,9 +4453,7 @@ class _Plot(pg.PlotWidget):
                             min_ = common_min
                             max_ = common_max
                         else:
-                            samples = signal.plot_samples[
-                                np.isfinite(signal.plot_samples)
-                            ]
+                            samples = signal.plot_samples[np.isfinite(signal.plot_samples)]
                             if len(samples):
                                 min_, max_ = (
                                     np.nanmin(samples),
@@ -4618,9 +4462,11 @@ class _Plot(pg.PlotWidget):
                             else:
                                 min_, max_ = 0, 1
 
-                        if min_ != min_:
+                        if min_ != min_:  # noqa: PLR0124
+                            # min_ is NaN
                             min_ = 0
-                        if max_ != max_:
+                        if max_ != max_:  # noqa: PLR0124
+                            # max_ is NaN
                             max_ = 1
 
                         signal.y_range = min_, max_
@@ -4633,9 +4479,7 @@ class _Plot(pg.PlotWidget):
                 self.update()
 
             elif (
-                key == QtCore.Qt.Key_F
-                and modifier == QtCore.Qt.ShiftModifier
-                and not self.locked
+                key == QtCore.Qt.Key.Key_F and modifier == QtCore.Qt.KeyboardModifier.ShiftModifier and not self.locked
             ):
                 self.block_zoom_signal = True
                 parent = self.parent().parent()
@@ -4663,9 +4507,11 @@ class _Plot(pg.PlotWidget):
                         else:
                             min_, max_ = 0, 1
 
-                        if min_ != min_:
+                        if min_ != min_:  # noqa: PLR0124
+                            # min_ is NaN
                             min_ = 0
-                        if max_ != max_:
+                        if max_ != max_:  # noqa: PLR0124
+                            # max is NaN
                             max_ = 1
 
                         signal.y_range = min_, max_
@@ -4676,35 +4522,106 @@ class _Plot(pg.PlotWidget):
                 self.zoom_changed.emit(False)
                 self.update()
 
-            elif key == QtCore.Qt.Key_G and modifier == QtCore.Qt.NoModifier:
-                y = self.plotItem.ctrl.yGridCheck.isChecked()
-                x = self.plotItem.ctrl.xGridCheck.isChecked()
+            elif key == QtCore.Qt.Key.Key_G:
+                if modifier == QtCore.Qt.KeyboardModifier.NoModifier:
+                    y = self.y_axis.grid
+                    x = self.x_axis.grid
+                    # y = self.plotItem.ctrl.yGridCheck.isChecked()
+                    # x = self.plotItem.ctrl.xGridCheck.isChecked()
 
-                if x and y:
-                    self.plotItem.showGrid(x=False, y=False)
-                elif x:
-                    self.plotItem.showGrid(x=True, y=True)
-                else:
-                    self.plotItem.showGrid(x=True, y=False)
+                    if x and y:
+                        self.y_axis.grid = False
+                        self.x_axis.grid = False
+                    elif x:
+                        self.y_axis.grid = True
+                        self.x_axis.grid = True
+                    else:
+                        self.y_axis.grid = False
+                        self.x_axis.grid = True
 
-                self.update()
+                    self.x_axis.picture = None
+                    self.y_axis.picture = None
+
+                    self.update()
+
+                elif modifier == QtCore.Qt.KeyboardModifier.ShiftModifier:
+                    if self.cursor1 is not None:
+                        value, ok = QtWidgets.QInputDialog.getDouble(
+                            self,
+                            "Go to time stamp",
+                            "Time stamp",
+                            value=self.cursor1.value(),
+                            decimals=9,
+                        )
+
+                        if ok:
+                            self.cursor1.setPos(value)
+                            self.cursor_move_finished.emit(self.cursor1)
 
             elif (
-                key in (QtCore.Qt.Key_I, QtCore.Qt.Key_O)
-                and modifier == QtCore.Qt.NoModifier
+                key in (QtCore.Qt.Key.Key_I, QtCore.Qt.Key.Key_O) and modifier == QtCore.Qt.KeyboardModifier.NoModifier
             ):
                 x_range, _ = self.viewbox.viewRange()
                 delta = x_range[1] - x_range[0]
-                if key == QtCore.Qt.Key_I:
+                if key == QtCore.Qt.Key.Key_I:
                     step = -delta * 0.25
                 else:
                     step = delta * 0.5
-                if self.cursor1:
+                if (
+                    self.cursor1
+                    and self.cursor1.isVisible()
+                    and self._settings.value("zoom_x_center_on_cursor", True, type=bool)
+                ):
                     pos = self.cursor1.value()
                     x_range = pos - delta / 2, pos + delta / 2
+
                 self.viewbox.setXRange(x_range[0] - step, x_range[1] + step, padding=0)
 
-            elif key == QtCore.Qt.Key_R and modifier == QtCore.Qt.NoModifier:
+            elif (
+                key in (QtCore.Qt.Key.Key_I, QtCore.Qt.Key.Key_O)
+                and modifier == QtCore.Qt.KeyboardModifier.ShiftModifier
+                and not self.locked
+            ):
+                if key == QtCore.Qt.Key.Key_I:
+                    factor = 0.165
+                else:
+                    factor = -0.165
+
+                self.block_zoom_signal = True
+
+                if self._settings.value("zoom_y_center_on_cursor", True, type=bool):
+                    value_info = self.value_at_cursor()
+                    if not isinstance(value_info[0], (int, float)):
+                        delta_proc = 0
+                    else:
+                        y, sig_y_bottom, sig_y_top = value_info
+                        delta_proc = (y - (sig_y_top + sig_y_bottom) / 2) / (sig_y_top - sig_y_bottom)
+                else:
+                    delta_proc = 0
+
+                for sig in self.signals:
+                    sig_y_bottom, sig_y_top = sig.y_range
+
+                    # center on the signal cursor Y value
+                    shift = delta_proc * (sig_y_top - sig_y_bottom)
+                    sig_y_top, sig_y_bottom = sig_y_top + shift, sig_y_bottom + shift
+
+                    delta = sig_y_top - sig_y_bottom
+                    sig_y_top -= delta * factor
+                    sig_y_bottom += delta * factor
+
+                    sig, idx = self.signal_by_uuid(sig.uuid)
+
+                    axis = self.axes[idx]
+                    if isinstance(axis, FormatedAxis):
+                        axis.setRange(sig_y_bottom, sig_y_top)
+                    else:
+                        self.set_y_range(sig.uuid, (sig_y_bottom, sig_y_top))
+
+                self.block_zoom_signal = False
+                self.zoom_changed.emit(False)
+
+            elif key == QtCore.Qt.Key.Key_R and modifier == QtCore.Qt.KeyboardModifier.NoModifier:
                 if self.region is None:
                     color = self.cursor1.pen.color().name()
 
@@ -4720,9 +4637,7 @@ class _Plot(pg.PlotWidget):
                     self.viewbox.addItem(self.region)
                     self.region.sigRegionChanged.connect(self.range_modified.emit)
                     self.region.sigRegionChanged.connect(self.range_modified_handler)
-                    self.region.sigRegionChangeFinished.connect(
-                        self.range_modified_finished_handler
-                    )
+                    self.region.sigRegionChangeFinished.connect(self.range_modified_finished_handler)
                     start, stop = self.viewbox.viewRange()[0]
                     start, stop = (
                         start + 0.1 * (stop - start),
@@ -4732,14 +4647,13 @@ class _Plot(pg.PlotWidget):
 
                     if self.cursor1 is not None:
                         self.cursor1.hide()
-                        self.region.setRegion(
-                            tuple(sorted((self.cursor1.value(), stop)))
-                        )
+                        self.region.setRegion(tuple(sorted((self.cursor1.value(), stop))))
 
                 else:
                     self.region_lock = None
                     self.region.setParent(None)
                     self.region.hide()
+                    self.region.deleteLater()
                     self.region = None
                     self.range_removed.emit()
 
@@ -4748,10 +4662,10 @@ class _Plot(pg.PlotWidget):
 
                 self.update()
 
-            elif key == QtCore.Qt.Key_S and modifier == QtCore.Qt.ControlModifier:
+            elif key == QtCore.Qt.Key.Key_S and modifier == QtCore.Qt.KeyboardModifier.ControlModifier:
                 file_name, _ = QtWidgets.QFileDialog.getSaveFileName(
                     self,
-                    "Select output measurement file",
+                    "Save as measurement file",
                     "",
                     "MDF version 4 files (*.mf4 *.mf4z)",
                 )
@@ -4783,9 +4697,7 @@ class _Plot(pg.PlotWidget):
                                 tmpf = Path(gettempdir()) / f"{perf_counter()}.mf4"
                                 mdf.save(tmpf, overwrite=True, compression=2)
 
-                                zipped_mf4 = ZipFile(
-                                    file_name, "w", compression=ZIP_DEFLATED
-                                )
+                                zipped_mf4 = ZipFile(file_name, "w", compression=ZIP_DEFLATED)
                                 zipped_mf4.write(
                                     str(tmpf),
                                     file_name.with_suffix(".mf4").name,
@@ -4797,21 +4709,13 @@ class _Plot(pg.PlotWidget):
                             else:
                                 mdf.save(file_name, overwrite=True, compression=2)
 
-            elif (
-                key == QtCore.Qt.Key_S
-                and modifier == QtCore.Qt.NoModifier
-                and not self.locked
-            ):
+            elif key == QtCore.Qt.Key.Key_S and modifier == QtCore.Qt.KeyboardModifier.NoModifier and not self.locked:
                 self.block_zoom_signal = True
                 parent = self.parent().parent()
                 uuids = []
 
                 iterator = QtWidgets.QTreeWidgetItemIterator(parent.channel_selection)
-                while True:
-                    item = iterator.value()
-                    if item is None:
-                        break
-
+                while item := iterator.value():
                     if item.type() == ChannelsTreeItem.Channel and item.signal.enable:
                         uuids.append(item.uuid)
 
@@ -4822,33 +4726,24 @@ class _Plot(pg.PlotWidget):
                 count = sum(
                     1
                     for sig in self.signals
-                    if sig.min != "n.a."
-                    and sig.enable
-                    and sig.uuid not in self.common_axis_items
+                    if sig.min != "n.a." and sig.enable and sig.uuid not in self.common_axis_items
                 )
 
-                if any(
-                    sig.min != "n.a."
-                    and sig.enable
-                    and sig.uuid in self.common_axis_items
-                    for sig in self.signals
-                ):
+                if any(sig.min != "n.a." and sig.enable and sig.uuid in self.common_axis_items for sig in self.signals):
                     count += 1
 
                     common_min_ = np.nanmin(
                         [
                             np.nanmin(self.signal_by_uuid(uuid)[0].plot_samples)
                             for uuid in self.common_axis_items
-                            if len(self.signal_by_uuid(uuid)[0].plot_samples)
-                            and self.signal_by_uuid(uuid)[0].enable
+                            if len(self.signal_by_uuid(uuid)[0].plot_samples) and self.signal_by_uuid(uuid)[0].enable
                         ]
                     )
                     common_max_ = np.nanmax(
                         [
                             np.nanmax(self.signal_by_uuid(uuid)[0].plot_samples)
                             for uuid in self.common_axis_items
-                            if len(self.signal_by_uuid(uuid)[0].plot_samples)
-                            and self.signal_by_uuid(uuid)[0].enable
+                            if len(self.signal_by_uuid(uuid)[0].plot_samples) and self.signal_by_uuid(uuid)[0].enable
                         ]
                     )
 
@@ -4920,9 +4815,7 @@ class _Plot(pg.PlotWidget):
                 self.update()
 
             elif (
-                key == QtCore.Qt.Key_S
-                and modifier == QtCore.Qt.ShiftModifier
-                and not self.locked
+                key == QtCore.Qt.Key.Key_S and modifier == QtCore.Qt.KeyboardModifier.ShiftModifier and not self.locked
             ):
                 self.block_zoom_signal = True
                 parent = self.parent().parent()
@@ -4956,27 +4849,19 @@ class _Plot(pg.PlotWidget):
 
                                 min_ = np.nanmin(
                                     [
-                                        np.nanmin(
-                                            self.signal_by_uuid(uuid)[0].plot_samples
-                                        )
+                                        np.nanmin(self.signal_by_uuid(uuid)[0].plot_samples)
                                         for uuid in self.common_axis_items
                                         if uuid in uuids_set
-                                        and len(
-                                            self.signal_by_uuid(uuid)[0].plot_samples
-                                        )
+                                        and len(self.signal_by_uuid(uuid)[0].plot_samples)
                                         and self.signal_by_uuid(uuid)[0].enable
                                     ]
                                 )
                                 max_ = np.nanmax(
                                     [
-                                        np.nanmax(
-                                            self.signal_by_uuid(uuid)[0].plot_samples
-                                        )
+                                        np.nanmax(self.signal_by_uuid(uuid)[0].plot_samples)
                                         for uuid in self.common_axis_items
                                         if uuid in uuids_set
-                                        and len(
-                                            self.signal_by_uuid(uuid)[0].plot_samples
-                                        )
+                                        and len(self.signal_by_uuid(uuid)[0].plot_samples)
                                         and self.signal_by_uuid(uuid)[0].enable
                                     ]
                                 )
@@ -5034,12 +4919,12 @@ class _Plot(pg.PlotWidget):
 
                 self.update()
 
-            elif key in (QtCore.Qt.Key_Left, QtCore.Qt.Key_Right) and modifier in (
-                QtCore.Qt.NoModifier,
-                QtCore.Qt.ControlModifier,
+            elif key in (QtCore.Qt.Key.Key_Left, QtCore.Qt.Key.Key_Right) and modifier in (
+                QtCore.Qt.KeyboardModifier.NoModifier,
+                QtCore.Qt.KeyboardModifier.ControlModifier,
             ):
                 if self.region is None:
-                    if modifier == QtCore.Qt.ControlModifier:
+                    if modifier == QtCore.Qt.KeyboardModifier.ControlModifier:
                         increment = 20
                     else:
                         increment = 1
@@ -5049,14 +4934,14 @@ class _Plot(pg.PlotWidget):
                     dim = x.size
                     if dim:
                         pos = np.searchsorted(x, pos)
-                        if key == QtCore.Qt.Key_Right:
+                        if key == QtCore.Qt.Key.Key_Right:
                             pos += increment
                         else:
                             pos -= increment
                         pos = np.clip(pos, 0, dim - increment)
                         pos = x[pos]
                     else:
-                        if key == QtCore.Qt.Key_Right:
+                        if key == QtCore.Qt.Key.Key_Right:
                             pos += increment
                         else:
                             pos -= increment
@@ -5065,14 +4950,10 @@ class _Plot(pg.PlotWidget):
 
                     if pos >= right_side:
                         delta = abs(pos - prev_pos)
-                        self.viewbox.setXRange(
-                            left_side + delta, right_side + delta, padding=0
-                        )
+                        self.viewbox.setXRange(left_side + delta, right_side + delta, padding=0)
                     elif pos <= left_side:
                         delta = abs(pos - prev_pos)
-                        self.viewbox.setXRange(
-                            left_side - delta, right_side - delta, padding=0
-                        )
+                        self.viewbox.setXRange(left_side - delta, right_side - delta, padding=0)
 
                     self.cursor1.set_value(pos)
 
@@ -5081,7 +4962,7 @@ class _Plot(pg.PlotWidget):
                     start, stop = self.region.getRegion()
 
                     if self.region_lock is None:
-                        if modifier == QtCore.Qt.ControlModifier:
+                        if modifier == QtCore.Qt.KeyboardModifier.ControlModifier:
                             pos = stop
                             second_pos = start
                         else:
@@ -5097,14 +4978,14 @@ class _Plot(pg.PlotWidget):
                     dim = x.size
                     if dim:
                         pos = np.searchsorted(x, pos)
-                        if key == QtCore.Qt.Key_Right:
+                        if key == QtCore.Qt.Key.Key_Right:
                             pos += increment
                         else:
                             pos -= increment
                         pos = np.clip(pos, 0, dim - increment)
                         pos = x[pos]
                     else:
-                        if key == QtCore.Qt.Key_Right:
+                        if key == QtCore.Qt.Key.Key_Right:
                             pos += increment
                         else:
                             pos -= increment
@@ -5122,16 +5003,16 @@ class _Plot(pg.PlotWidget):
                         self.region.setRegion(tuple(sorted((second_pos, pos))))
 
             elif (
-                key in (QtCore.Qt.Key_Left, QtCore.Qt.Key_Right)
-                and modifier == QtCore.Qt.ShiftModifier
+                key in (QtCore.Qt.Key.Key_Left, QtCore.Qt.Key.Key_Right)
+                and modifier == QtCore.Qt.KeyboardModifier.ShiftModifier
             ):
                 parent = self.parent().parent()
                 uuids = list(
-                    set(
+                    {
                         item.uuid
                         for item in parent.channel_selection.selectedItems()
                         if item.type() == ChannelsTreeItem.Channel
-                    )
+                    }
                 )
 
                 if not uuids:
@@ -5141,7 +5022,7 @@ class _Plot(pg.PlotWidget):
 
                 offset = (stop - start) / 100
 
-                if key == QtCore.Qt.Key_Left:
+                if key == QtCore.Qt.Key.Key_Left:
                     offset = -offset
 
                 self.set_time_offset([False, offset, *uuids])
@@ -5149,28 +5030,26 @@ class _Plot(pg.PlotWidget):
             elif (
                 key
                 in (
-                    QtCore.Qt.Key_Up,
-                    QtCore.Qt.Key_Down,
-                    QtCore.Qt.Key_PageUp,
-                    QtCore.Qt.Key_PageDown,
+                    QtCore.Qt.Key.Key_Up,
+                    QtCore.Qt.Key.Key_Down,
+                    QtCore.Qt.Key.Key_PageUp,
+                    QtCore.Qt.Key.Key_PageDown,
                 )
-                and modifier == QtCore.Qt.ShiftModifier
+                and modifier == QtCore.Qt.KeyboardModifier.ShiftModifier
             ):
                 parent = self.parent().parent()
                 uuids = list(
-                    set(
+                    {
                         item.uuid
                         for item in parent.channel_selection.selectedItems()
                         if item.type() == ChannelsTreeItem.Channel
-                    )
+                    }
                 )
 
                 if not uuids:
                     return
 
-                factor = (
-                    10 if key in (QtCore.Qt.Key_PageUp, QtCore.Qt.Key_PageDown) else 100
-                )
+                factor = 10 if key in (QtCore.Qt.Key.Key_PageUp, QtCore.Qt.Key.Key_PageDown) else 100
 
                 for uuid in uuids:
                     signal, index = self.signal_by_uuid(uuid)
@@ -5178,7 +5057,7 @@ class _Plot(pg.PlotWidget):
                     bottom, top = signal.y_range
                     step = (top - bottom) / factor
 
-                    if key in (QtCore.Qt.Key_Up, QtCore.Qt.Key_PageUp):
+                    if key in (QtCore.Qt.Key.Key_Up, QtCore.Qt.Key.Key_PageUp):
                         step = -step
 
                     signal.y_range = bottom + step, top + step
@@ -5187,7 +5066,7 @@ class _Plot(pg.PlotWidget):
 
                 self.update()
 
-            elif key == QtCore.Qt.Key_H and modifier == QtCore.Qt.NoModifier:
+            elif key == QtCore.Qt.Key.Key_H and modifier == QtCore.Qt.KeyboardModifier.NoModifier:
                 start_ts, stop_ts = self.viewbox.viewRange()[0]
 
                 if len(self.all_timebase):
@@ -5226,7 +5105,7 @@ class _Plot(pg.PlotWidget):
                 if self.cursor1:
                     self.cursor_moved.emit(self.cursor1)
 
-            elif key == QtCore.Qt.Key_W and modifier == QtCore.Qt.NoModifier:
+            elif key == QtCore.Qt.Key.Key_W and modifier == QtCore.Qt.KeyboardModifier.NoModifier:
                 if len(self.all_timebase):
                     start_ts = np.amin(self.all_timebase)
                     stop_ts = np.amax(self.all_timebase)
@@ -5236,14 +5115,17 @@ class _Plot(pg.PlotWidget):
                     if self.cursor1:
                         self.cursor_moved.emit(self.cursor1)
 
-            elif key == QtCore.Qt.Key_Insert and modifier == QtCore.Qt.NoModifier:
+            elif key == QtCore.Qt.Key.Key_Insert and modifier == QtCore.Qt.KeyboardModifier.NoModifier:
                 self.insert_computation()
 
             else:
                 handled = False
 
             if not handled:
+                event.ignore()
                 self.parent().keyPressEvent(event)
+            else:
+                event.accept()
 
     def open_scale_editor(self, uuid):
         uuid = uuid or self.current_uuid
@@ -5277,39 +5159,48 @@ class _Plot(pg.PlotWidget):
         super().paintEvent(ev)
 
         if self._pixmap is None:
-            self._pixmap = QtGui.QPixmap(event_rect.width(), event_rect.height())
+            ratio = self.devicePixelRatio()
+
+            self._pixmap = QtGui.QPixmap(int(event_rect.width() * ratio), int(event_rect.height() * ratio))
             self._pixmap.fill(self.backgroundBrush().color())
 
             paint = QtGui.QPainter()
             paint.begin(self._pixmap)
-            paint.setCompositionMode(QtGui.QPainter.CompositionMode_SourceOver)
+            paint.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceOver)
             paint.setRenderHints(paint.RenderHint.Antialiasing, False)
 
             self.x_range, self.y_range = self.viewbox.viewRange()
 
             rect = self.viewbox.sceneBoundingRect()
+            rect.setSize(rect.size() * ratio)
+            rect.moveTo(rect.topLeft() * ratio)
 
             self.px = (self.x_range[1] - self.x_range[0]) / rect.width()
             self.py = rect.height()
 
             with_dots = self.with_dots
 
-            self.auto_clip_rect(paint)
-
-            rect = self.viewbox.sceneBoundingRect()
-
             delta = rect.x()
             x_start = self.x_range[0]
 
             no_brush = QtGui.QBrush()
-            pen_width = self.line_width
-            dots_with = self.dot_width
+            pen_width = self._settings.value("line_width", 1, type=int)
+            dots_with = self._settings.value("dots_width", 4, type=int)
 
             paint.resetTransform()
             paint.translate(0, 0)
             paint.setBrush(no_brush)
 
             flash_current_signal = self.flash_current_signal
+
+            if self._settings.value("curve_dots_cap_style", "square") == "square":
+                cap_style = QtCore.Qt.PenCapStyle.SquareCap
+            else:
+                cap_style = QtCore.Qt.PenCapStyle.RoundCap
+
+            curve = self._curve
+            step_mode = self.line_interconnect
+            default_connect = curve.opts["connect"]
 
             for i, sig in enumerate(self.signals):
                 if (
@@ -5323,34 +5214,33 @@ class _Plot(pg.PlotWidget):
                 y = sig.plot_samples
                 x = sig.plot_timestamps
 
-                x, y = self.scale_curve_to_pixmap(
-                    x, y, y_range=sig.y_range, x_start=x_start, delta=delta
-                )
+                if len(x):
+                    x, y = self.scale_curve_to_pixmap(x, y, y_range=sig.y_range, x_start=x_start, delta=delta)
 
-                sig.pen.setWidth(pen_width)
+                    sig.pen.setWidth(pen_width)
 
-                paint.setPen(sig.pen)
+                    paint.setPen(sig.pen)
 
-                pth = self.generatePath(x, y, sig)
-                paint.drawPath(pth)
+                    pth = self.generatePath(x, y, sig)
+                    paint.drawPath(pth)
 
-                if with_dots:
-                    paint.setRenderHints(paint.RenderHint.Antialiasing, True)
-                    pos = np.isfinite(y)
-                    y = y[pos]
-                    x = x[pos]
+                    if with_dots:
+                        paint.setRenderHints(paint.RenderHint.Antialiasing, True)
+                        pos = np.isfinite(y)
+                        y = y[pos]
+                        x = x[pos]
 
-                    _pen = fn.mkPen(sig.color.name())
-                    _pen.setWidth(dots_with)
-                    _pen.setCapStyle(QtCore.Qt.RoundCap)
-                    paint.setPen(_pen)
+                        _pen = fn.mkPen(sig.color.name())
+                        _pen.setWidth(dots_with)
+                        _pen.setCapStyle(cap_style)
+                        paint.setPen(_pen)
 
-                    poly, arr = polygon_and_ndarray(x.size)
+                        poly, arr = polygon_and_ndarray(x.size)
 
-                    arr[:, 0] = x
-                    arr[:, 1] = y
-                    paint.drawPoints(poly)
-                    paint.setRenderHints(paint.RenderHint.Antialiasing, False)
+                        arr[:, 0] = x
+                        arr[:, 1] = y
+                        paint.drawPoints(poly)
+                        paint.setRenderHints(paint.RenderHint.Antialiasing, False)
 
                 item = self.plot_parent.item_by_uuid(sig.uuid)
                 if not item:
@@ -5407,13 +5297,31 @@ class _Plot(pg.PlotWidget):
                             if not np.any(idx):
                                 continue
 
-                            y = sig.plot_samples.astype("f8")
-                            y[~idx] = np.inf
-                            x = sig.plot_timestamps
+                            if step_mode == "right":
+                                idx_with_edges = get_idx_with_edges(idx)
+                                _connect = "finite"
+                                y = sig.plot_samples.astype("f8")
+                                y[~idx_with_edges] = np.inf
+                                x = sig.plot_timestamps
 
-                            x, y = self.scale_curve_to_pixmap(
-                                x, y, y_range=sig.y_range, x_start=x_start, delta=delta
-                            )
+                            elif step_mode == "":
+                                last = idx[-1]
+                                idx_with_edges = np.roll(idx, -1)
+                                idx_with_edges[-1] = last
+                                _connect = idx_with_edges.view("u1")
+                                y = sig.plot_samples.astype("f8")
+                                x = sig.plot_timestamps
+
+                            if step_mode == "left":
+                                idx_with_edges = np.repeat(get_idx_with_edges(idx), 2)
+                                idx_with_edges = np.insert(idx_with_edges, 0, idx_with_edges[0])
+                                _connect = idx_with_edges[:-1].view("u1")
+                                y = sig.plot_samples.astype("f8")
+                                x = sig.plot_timestamps
+
+                            curve.opts["connect"] = _connect
+
+                            x, y = self.scale_curve_to_pixmap(x, y, y_range=sig.y_range, x_start=x_start, delta=delta)
 
                             color = range_info["font_color"]
                             pen = fn.mkPen(color.name())
@@ -5422,12 +5330,21 @@ class _Plot(pg.PlotWidget):
                             paint.setPen(pen)
                             paint.drawPath(self.generatePath(x, y))
 
+                            curve.opts["connect"] = default_connect
+
                             if with_dots:
-                                paint.setRenderHints(
-                                    paint.RenderHint.Antialiasing, True
+                                y = sig.plot_samples.astype("f8")
+                                y[~idx] = np.inf
+
+                                x = sig.plot_timestamps
+
+                                x, y = self.scale_curve_to_pixmap(
+                                    x, y, y_range=sig.y_range, x_start=x_start, delta=delta
                                 )
+
+                                paint.setRenderHints(paint.RenderHint.Antialiasing, True)
                                 pen.setWidth(dots_with)
-                                pen.setCapStyle(QtCore.Qt.RoundCap)
+                                pen.setCapStyle(cap_style)
                                 paint.setPen(pen)
 
                                 pos = np.isfinite(y)
@@ -5439,15 +5356,16 @@ class _Plot(pg.PlotWidget):
                                 arr[:, 0] = x
                                 arr[:, 1] = y
                                 paint.drawPoints(poly)
-                                paint.setRenderHints(
-                                    paint.RenderHint.Antialiasing, False
-                                )
+                                paint.setRenderHints(paint.RenderHint.Antialiasing, False)
+
             paint.end()
+
+            self._pixmap.setDevicePixelRatio(self.devicePixelRatio())
 
         paint = QtGui.QPainter()
         vp = self.viewport()
         paint.begin(vp)
-        paint.setCompositionMode(QtGui.QPainter.CompositionMode_SourceOver)
+        paint.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceOver)
         paint.setRenderHint(paint.RenderHint.Antialiasing, False)
 
         if self.y_axis.picture is None:
@@ -5455,30 +5373,55 @@ class _Plot(pg.PlotWidget):
         if self.x_axis.picture is None:
             self.x_axis.paint(paint, None, None)
 
+        ratio = self.devicePixelRatio()
+
+        r = self.y_axis.boundingRect()
+        r.setSize(self.y_axis.picture.size())
+        r.moveTo(r.topLeft() * ratio)
         paint.drawPixmap(
             self.y_axis.sceneBoundingRect(),
             self.y_axis.picture,
-            self.y_axis.boundingRect(),
+            r,
         )
+
+        r = self.x_axis.boundingRect()
+        r.setSize(self.x_axis.picture.size())
+        r.moveTo(r.topLeft() * ratio)
         paint.drawPixmap(
             self.x_axis.sceneBoundingRect(),
             self.x_axis.picture,
-            self.x_axis.boundingRect(),
+            r,
         )
 
         for ax in self.axes:
             if isinstance(ax, FormatedAxis) and ax.isVisible():
                 if ax.picture is None:
                     ax.paint(paint, None, None)
+
+                r = ax.boundingRect()
+                r.setSize(ax.picture.size())
+                r.moveTo(r.topLeft() * ratio)
+
                 paint.drawPixmap(
                     ax.sceneBoundingRect(),
                     ax.picture,
-                    ax.boundingRect(),
+                    r,
                 )
 
-        self.auto_clip_rect(paint)
+        r = self.viewbox.sceneBoundingRect()
+        r.setLeft(r.left() + 5)
+        r.setSize(r.size() * ratio)
+        r.moveTo(r.topLeft() * ratio)
 
-        paint.drawPixmap(event_rect, self._pixmap, event_rect)
+        t = self.viewbox.sceneBoundingRect()
+        t = self.viewbox.sceneBoundingRect()
+        t.setLeft(t.left() + 5)
+
+        paint.setClipping(False)
+        paint.drawPixmap(t.toRect(), self._pixmap, r.toRect())
+        paint.setClipping(True)
+
+        self.auto_clip_rect(paint)
 
         self.draw_grids(paint, event_rect)
 
@@ -5518,11 +5461,7 @@ class _Plot(pg.PlotWidget):
 
             rect = None
 
-            if (
-                zoom_mode == self.viewbox.X_zoom
-                or zoom_mode in self.viewbox.XY_zoom
-                and self.locked
-            ):
+            if zoom_mode == self.viewbox.X_zoom or zoom_mode in self.viewbox.XY_zoom and self.locked:
                 x1, x2 = sorted([x1, x2])
                 rect = QtCore.QRectF(
                     x1,
@@ -5556,7 +5495,7 @@ class _Plot(pg.PlotWidget):
                 color = fn.mkColor(0x62, 0xB2, 0xE2, 50)
                 paint.setBrush(fn.mkBrush(color))
 
-                paint.setCompositionMode(QtGui.QPainter.CompositionMode_SourceAtop)
+                paint.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceAtop)
                 paint.drawRect(rect)
 
         paint.end()
@@ -5569,23 +5508,24 @@ class _Plot(pg.PlotWidget):
         if self.region_lock is not None:
             for i in range(2):
                 if self.region.lines[i].value() == self.region_lock:
-                    self.region.lines[i].pen.setStyle(QtCore.Qt.DashDotDotLine)
+                    self.region.lines[i].pen.setStyle(QtCore.Qt.PenStyle.DashDotDotLine)
                 else:
-                    self.region.lines[i].pen.setStyle(QtCore.Qt.SolidLine)
+                    self.region.lines[i].pen.setStyle(QtCore.Qt.PenStyle.SolidLine)
         self.range_modified_finished.emit(region)
 
     def range_modified_handler(self, region):
         if self.region_lock is not None:
             for i in range(2):
                 if self.region.lines[i].value() == self.region_lock:
-                    self.region.lines[i].pen.setStyle(QtCore.Qt.DashDotDotLine)
+                    self.region.lines[i].pen.setStyle(QtCore.Qt.PenStyle.DashDotDotLine)
                 else:
-                    self.region.lines[i].pen.setStyle(QtCore.Qt.SolidLine)
+                    self.region.lines[i].pen.setStyle(QtCore.Qt.PenStyle.SolidLine)
 
     def scale_curve_to_pixmap(self, x, y, y_range, x_start, delta):
         if self.py:
             y_low, y_high = y_range
-            y_scale = (y_high - y_low) / self.py
+
+            y_scale = (np.float64(y_high) - np.float64(y_low)) / np.float64(self.py)
             x_scale = self.px
 
             if y_scale * x_scale:
@@ -5616,8 +5556,15 @@ class _Plot(pg.PlotWidget):
         return x, y
 
     def select_curve(self, x, y):
-        delta = self.viewbox.sceneBoundingRect().x()
-        x_start = self.viewbox.viewRange()[0][0]
+        ratio = self.devicePixelRatio()
+        rect = self.viewbox.sceneBoundingRect()
+        rect.setSize(rect.size() * ratio)
+        rect.moveTo(rect.topLeft() * ratio)
+
+        delta = rect.x()
+        x_start = self.x_range[0]
+
+        y = y * ratio
 
         candidates = []
         for sig in self.signals:
@@ -5629,9 +5576,7 @@ class _Plot(pg.PlotWidget):
             if val == "n.a.":
                 continue
 
-            x_val, y_val = self.scale_curve_to_pixmap(
-                x, val, y_range=sig.y_range, x_start=x_start, delta=delta
-            )
+            x_val, y_val = self.scale_curve_to_pixmap(x, val, y_range=sig.y_range, x_start=x_start, delta=delta)
 
             candidates.append((abs(y_val - y), sig.uuid))
 
@@ -5643,9 +5588,9 @@ class _Plot(pg.PlotWidget):
         sig, index = self.signal_by_uuid(uuid)
 
         if sig.mode == "raw":
-            style = QtCore.Qt.DashLine
+            style = QtCore.Qt.PenStyle.DashLine
         else:
-            style = QtCore.Qt.SolidLine
+            style = QtCore.Qt.PenStyle.SolidLine
 
         sig.pen = fn.mkPen(color=color, style=style)
 
@@ -5662,7 +5607,7 @@ class _Plot(pg.PlotWidget):
     def set_common_axis(self, uuid, state):
         signal, idx = self.signal_by_uuid(uuid)
 
-        if state in (QtCore.Qt.Checked, True, 1):
+        if state in (QtCore.Qt.CheckState.Checked, True, 1):
             if not self.common_axis_items:
                 self.common_axis_y_range = signal.y_range
             else:
@@ -5671,9 +5616,7 @@ class _Plot(pg.PlotWidget):
         else:
             self.common_axis_items.remove(uuid)
 
-        self.common_axis_label = ", ".join(
-            self.signal_by_uuid(uuid)[0].name for uuid in self.common_axis_items
-        )
+        self.common_axis_label = ", ".join(self.signal_by_uuid(uuid)[0].name for uuid in self.common_axis_items)
 
         self.set_current_uuid(self.current_uuid, True)
         self.update()
@@ -5755,7 +5698,7 @@ class _Plot(pg.PlotWidget):
     def set_individual_axis(self, uuid, state):
         sig, index = self.signal_by_uuid(uuid)
 
-        if state in (QtCore.Qt.Checked, True, 1):
+        if state in (QtCore.Qt.CheckState.Checked, True, 1):
             if sig.enable:
                 self.get_axis(index).show()
             sig.individual_axis = True
@@ -5783,7 +5726,7 @@ class _Plot(pg.PlotWidget):
 
     def set_name(self, uuid, name):
         sig, index = self.signal_by_uuid(uuid)
-        sig.name = name
+        sig.name = name or ""
 
         sig_axis = [self.get_axis(index)]
 
@@ -5807,7 +5750,7 @@ class _Plot(pg.PlotWidget):
     def set_signal_enable(self, uuid, state):
         signal, index = self.signal_by_uuid(uuid)
 
-        if state in (QtCore.Qt.Checked, True, 1):
+        if state in (QtCore.Qt.CheckState.Checked, True, 1):
             (start, stop), _ = self.viewbox.viewRange()
             width = self.width() - self.y_axis.width()
 
@@ -5879,7 +5822,7 @@ class _Plot(pg.PlotWidget):
 
     def set_unit(self, uuid, unit):
         sig, index = self.signal_by_uuid(uuid)
-        sig.unit = unit
+        sig.unit = unit or ""
 
         sig_axis = [self.get_axis(index)]
 
@@ -5943,9 +5886,7 @@ class _Plot(pg.PlotWidget):
             if sig.name == name:
                 return sig, i
 
-        raise Exception(
-            f"Signal not found: {name} {[sig.name for sig in self.signals]}"
-        )
+        raise Exception(f"Signal not found: {name} {[sig.name for sig in self.signals]}")
 
     def signal_by_uuid(self, uuid):
         return self._uuid_map[uuid]
@@ -5973,14 +5914,42 @@ class _Plot(pg.PlotWidget):
             if sig.enable:
                 sig.trim(start, stop, width, force)
 
-    def update(self, *args, **kwargs):
-        self._pixmap = None
+    def update(self, *args, pixmap=None, **kwargs):
+        self._pixmap = pixmap
         self.viewbox.update()
 
     def update_views(self):
         geometry = self.viewbox.sceneBoundingRect()
         if geometry != self.viewbox_geometry:
             self.viewbox_geometry = geometry
+
+    def value_at_cursor(self, uuid=None):
+        uuid = uuid or self.current_uuid
+
+        if uuid is None:
+            y, sig_y_bottom, sig_y_top = "n.a.", 0, 1
+        elif self.cursor1:
+            if not self.cursor1.isVisible():
+                cursor = self.region.lines[0]
+            else:
+                cursor = self.cursor1
+
+            timestamp = cursor.value()
+            sig, idx = self.signal_by_uuid(uuid)
+            sig_y_bottom, sig_y_top = sig.y_range
+            y, *_ = sig.value_at_timestamp(timestamp, numeric=True)
+
+        else:
+            sig, idx = self.signal_by_uuid(uuid)
+            sig_y_bottom, sig_y_top = sig.y_range
+            if not sig.current_position:
+                return "n.a.", sig_y_bottom, sig_y_top
+            else:
+                y = sig._phys_samples[sig.current_position - 1]
+                if y.dtype.kind not in "uif":
+                    y = sig._raw_samples[sig.current_position - 1]
+
+        return y, sig_y_bottom, sig_y_top
 
     def xrange_changed_handle(self, *args, force=False):
         if self._can_paint:
@@ -6036,20 +6005,20 @@ class CursorInfo(QtWidgets.QLabel):
         self.unit = unit
         self.plot = plot
 
-        self.setTextFormat(QtCore.Qt.RichText)
+        self.setTextFormat(QtCore.Qt.TextFormat.RichText)
         self.setAlignment(
-            QtCore.Qt.AlignRight | QtCore.Qt.AlignTrailing | QtCore.Qt.AlignVCenter
+            QtCore.Qt.AlignmentFlag.AlignRight
+            | QtCore.Qt.AlignmentFlag.AlignTrailing
+            | QtCore.Qt.AlignmentFlag.AlignVCenter
         )
 
-        self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self.open_menu)
 
         if precision == -1:
-            self.setToolTip(f"Cursor information uses maximum precision")
+            self.setToolTip("Cursor information uses maximum precision")
         else:
-            self.setToolTip(
-                f"Cursor information precision is set to {self.precision} decimals"
-            )
+            self.setToolTip(f"Cursor information precision is set to {self.precision} decimals")
 
     def open_menu(self, point):
         menu = QtWidgets.QMenu(self)
@@ -6069,12 +6038,13 @@ class CursorInfo(QtWidgets.QLabel):
                 QtCore.QSettings().setValue("plot_cursor_precision", precision)
 
     def update_value(self):
+        cursor_info_text = ""
         if not self.plot.region:
             if self.plot.cursor1 is not None:
                 position = self.plot.cursor1.value()
 
                 fmt = self.plot.x_axis.format
-                if fmt == "phys":
+                if fmt == "phys" or not fmt:
                     if self.precision == -1:
                         cursor_info_text = f"{self.name} = {position}{self.unit}"
                     else:
@@ -6083,11 +6053,11 @@ class CursorInfo(QtWidgets.QLabel):
                 elif fmt == "time":
                     cursor_info_text = f"{self.name} = {timedelta(seconds=position)}"
                 elif fmt == "date":
-                    position_date = self.plot.x_axis.origin + timedelta(
-                        seconds=position
-                    )
+                    position_date = self.plot.x_axis.origin + timedelta(seconds=position)
                     cursor_info_text = f"{self.name} = {position_date}"
-                self.setText(cursor_info_text)
+
+                if cursor_info_text:
+                    self.setText(cursor_info_text)
             else:
                 self.setText("")
 
@@ -6126,16 +6096,14 @@ class CursorInfo(QtWidgets.QLabel):
     def set_precision(self, precision):
         self.precision = precision
         if precision == -1:
-            self.setToolTip(f"Cursor information uses maximum precision")
+            self.setToolTip("Cursor information uses maximum precision")
         else:
-            self.setToolTip(
-                f"Cursor information precision is set to {precision} decimals"
-            )
+            self.setToolTip(f"Cursor information precision is set to {precision} decimals")
         self.update_value()
 
 
 try:
-    import scipy
+    import scipy  # noqa: F401
 
     from .fft_window import FFTWindow
 except ImportError:

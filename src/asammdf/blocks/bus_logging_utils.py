@@ -34,9 +34,7 @@ def defined_j1939_bit_count(signal):
     return size
 
 
-def apply_conversion(
-    vals: NDArray[Any], signal: Signal, ignore_value2text_conversion: bool
-) -> NDArray[Any]:
+def apply_conversion(vals: NDArray[Any], signal: Signal, ignore_value2text_conversion: bool) -> NDArray[Any]:
     a, b = float(signal.factor), float(signal.offset)
 
     if signal.values:
@@ -99,13 +97,9 @@ def extract_signal(
 
     if is_float:
         if bit_offset:
-            raise MdfException(
-                f"Cannot extract float signal '{signal}' because it is not byte aligned"
-            )
+            raise MdfException(f"Cannot extract float signal '{signal}' because it is not byte aligned")
         if bit_count not in (16, 32, 64):
-            raise MdfException(
-                f"Cannot extract float signal '{signal}' because it does not have a standard byte size"
-            )
+            raise MdfException(f"Cannot extract float signal '{signal}' because it does not have a standard byte size")
 
     if big_endian:
         byte_pos = start_byte + 1
@@ -238,8 +232,11 @@ def extract_signal(
                 vals = vals >> bit_offset
                 vals &= (2**bit_count) - 1
 
-    if signed and not is_float and bit_count not in (8, 16, 32, 64):
-        vals = as_non_byte_sized_signed_int(vals, bit_count)
+    if signed and not is_float:
+        if bit_count not in (8, 16, 32, 64):
+            vals = as_non_byte_sized_signed_int(vals, bit_count)
+        else:
+            vals = vals.view(f"i{std_size}")
 
     if not raw:
         vals = apply_conversion(vals, signal, ignore_value2text_conversion)
@@ -287,6 +284,7 @@ def extract_mux(
     include_message_name: bool = False,
     ignore_value2text_conversion: bool = True,
     is_j1939: bool = False,
+    is_extended: bool = False,
 ) -> dict[tuple[Any, ...], dict[str, ExtractedSignal]]:
     """extract multiplexed CAN signals from the raw payload
 
@@ -329,10 +327,7 @@ def extract_mux(
                     multiplexor_name = sig.name
                     break
             for sig in message:
-                if (
-                    sig.multiplex not in (None, "Multiplexor")
-                    and sig.muxer_for_signal is None
-                ):
+                if sig.multiplex not in (None, "Multiplexor") and sig.muxer_for_signal is None:
                     sig.muxer_for_signal = multiplexor_name
                     sig.mux_val_min = sig.mux_val_max = int(sig.multiplex)
                     sig.mux_val_grp.insert(0, (int(sig.multiplex), int(sig.multiplex)))
@@ -353,7 +348,7 @@ def extract_mux(
             pair_signals.append(signal)
 
     for pair, pair_signals in pairs.items():
-        entry = bus, message_id, original_message_id, muxer, *pair
+        entry = bus, message_id, is_extended, original_message_id, muxer, *pair
 
         extracted_signals[entry] = signals = {}
 
@@ -386,17 +381,13 @@ def extract_mux(
                     "name": sig_name,
                     "comment": sig.comment or "",
                     "unit": sig.unit or "",
-                    "samples": samples
-                    if raw
-                    else apply_conversion(samples, sig, ignore_value2text_conversion),
+                    "samples": samples if raw else apply_conversion(samples, sig, ignore_value2text_conversion),
                     "t": t_,
                     "invalidation_bits": None,
                 }
 
                 if is_j1939:
-                    signals[sig_name]["invalidation_bits"] = (
-                        samples > MAX_VALID_J1939[defined_j1939_bit_count(sig)]
-                    )
+                    signals[sig_name]["invalidation_bits"] = samples > MAX_VALID_J1939[defined_j1939_bit_count(sig)]
 
             except:
                 print(format_exc())
@@ -418,6 +409,7 @@ def extract_mux(
                         ignore_value2text_conversion=ignore_value2text_conversion,
                         raw=raw,
                         is_j1939=is_j1939,
+                        is_extended=is_extended,
                     )
                 )
 

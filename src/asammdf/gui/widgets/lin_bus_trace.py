@@ -1,10 +1,8 @@
-# -*- coding: utf-8 -*-
-import datetime
 import logging
 
 import dateutil.tz
 import pandas as pd
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtGui
 
 from .tabular_base import TabularBase
 
@@ -15,9 +13,7 @@ LOCAL_TIMEZONE = dateutil.tz.tzlocal()
 class LINBusTrace(TabularBase):
     add_channels_request = QtCore.Signal(list)
 
-    def __init__(
-        self, signals=None, start=0, format="phys", ranges=None, *args, **kwargs
-    ):
+    def __init__(self, signals=None, start=0, format="phys", ranges=None, *args, **kwargs):
         ranges = ranges or {name: [] for name in signals.columns}
         if not ranges["Event Type"]:
             ranges["Event Type"] = [
@@ -59,7 +55,7 @@ class LINBusTrace(TabularBase):
         self.prefix.currentIndexChanged.connect(self.prefix_changed)
 
         if prefixes:
-            self.remove_prefix.setCheckState(QtCore.Qt.Checked)
+            self.remove_prefix.setCheckState(QtCore.Qt.CheckState.Checked)
 
         self._settings = QtCore.QSettings()
         integer_mode = self._settings.value("tabular_format", "phys")

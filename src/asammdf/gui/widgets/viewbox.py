@@ -14,42 +14,80 @@ class ViewBoxMenu(QtWidgets.QMenu):
     def __init__(self, view):
         super().__init__()
 
+        self._settings = QtCore.QSettings()
+
         self.view = weakref.ref(
             view
         )  ## keep weakref to view to avoid circular reference (don't know why, but this prevents the ViewBox from being collected)
         self.valid = False  ## tells us whether the ui needs to be updated
-        self.viewMap = (
-            weakref.WeakValueDictionary()
-        )  ## weakrefs to all views listed in the link combos
+        self.viewMap = weakref.WeakValueDictionary()  ## weakrefs to all views listed in the link combos
 
-        self.leftMenu = QtWidgets.QMenu("Mouse Mode")
+        # mouse mode
+        self.mouse_mode_menu = QtWidgets.QMenu("Mouse Mode")
         group = QtGui.QActionGroup(self)
 
-        # This does not work! QAction _must_ be initialized with a permanent
-        # object as the parent or else it may be collected prematurely.
-        # pan = self.leftMenu.addAction("3 button", self.set3ButtonMode)
-        # zoom = self.leftMenu.addAction("1 button", self.set1ButtonMode)
-        pan = QtGui.QAction(ViewBoxMenu.pan, self.leftMenu)
-        cursor = QtGui.QAction(ViewBoxMenu.cursor, self.leftMenu)
-        zoom = QtGui.QAction("Rectangle selection mode", self.leftMenu)
-        self.leftMenu.addAction(pan)
-        self.leftMenu.addAction(cursor)
-        # self.leftMenu.addAction(zoom)
+        pan = QtGui.QAction(ViewBoxMenu.pan, self.mouse_mode_menu)
+        cursor = QtGui.QAction(ViewBoxMenu.cursor, self.mouse_mode_menu)
+        self.mouse_mode_menu.addAction(pan)
+        self.mouse_mode_menu.addAction(cursor)
         pan.triggered.connect(partial(self.set_mouse_mode, "pan"))
         cursor.triggered.connect(partial(self.set_mouse_mode, "cursor"))
-        zoom.triggered.connect(partial(self.set_mouse_mode, "rect"))
-
         pan.setCheckable(True)
         cursor.setCheckable(True)
-        zoom.setCheckable(True)
         pan.setActionGroup(group)
         cursor.setActionGroup(group)
-        zoom.setActionGroup(group)
-        self.mouseModes = [pan, cursor, zoom]
-        self.addMenu(self.leftMenu)
+        self.mouseModes = [pan, cursor]
+        self.addMenu(self.mouse_mode_menu)
+
+        # X zoom mode
+        self.x_zoom_mode_menu = QtWidgets.QMenu("X-axis zoom mode")
+        group = QtGui.QActionGroup(self)
+
+        center_on_cursor = QtGui.QAction("Center on cursor", self.x_zoom_mode_menu)
+        center_on_cursor.setCheckable(True)
+        center_on_cursor.setActionGroup(group)
+        self.x_zoom_mode_menu.addAction(center_on_cursor)
+
+        center_on_mouse = QtGui.QAction("Center on mouse position", self.x_zoom_mode_menu)
+        center_on_mouse.setCheckable(True)
+        center_on_mouse.setActionGroup(group)
+        self.x_zoom_mode_menu.addAction(center_on_mouse)
+
+        if self._settings.value("zoom_x_center_on_cursor", True, type=bool):
+            center_on_cursor.setChecked(True)
+        else:
+            center_on_mouse.setChecked(True)
+        center_on_cursor.triggered.connect(partial(self.set_x_zoom_mode, True))
+        center_on_mouse.triggered.connect(partial(self.set_x_zoom_mode, False))
+
+        self.addMenu(self.x_zoom_mode_menu)
+
+        # Y zoom mode
+        self.y_zoom_mode_menu = QtWidgets.QMenu("Y-axis zoom mode")
+        group = QtGui.QActionGroup(self)
+
+        center_on_cursor = QtGui.QAction("Center on cursor", self.y_zoom_mode_menu)
+        center_on_cursor.setCheckable(True)
+        center_on_cursor.setActionGroup(group)
+        self.y_zoom_mode_menu.addAction(center_on_cursor)
+
+        center_on_mouse = QtGui.QAction("Center on mouse position", self.y_zoom_mode_menu)
+        center_on_mouse.setCheckable(True)
+        center_on_mouse.setActionGroup(group)
+        self.y_zoom_mode_menu.addAction(center_on_mouse)
+
+        if self._settings.value("zoom_y_center_on_cursor", True, type=bool):
+            center_on_cursor.setChecked(True)
+        else:
+            center_on_mouse.setChecked(True)
+        center_on_cursor.triggered.connect(partial(self.set_y_zoom_mode, True))
+        center_on_mouse.triggered.connect(partial(self.set_y_zoom_mode, False))
+
+        self.addMenu(self.x_zoom_mode_menu)
+
+        self.addMenu(self.y_zoom_mode_menu)
 
         self.view().sigStateChanged.connect(self.viewStateChanged)
-
         self.updateState()
 
     def viewStateChanged(self):
@@ -62,8 +100,6 @@ class ViewBoxMenu(QtWidgets.QMenu):
             self.mouseModes[0].setChecked(True)
         elif state["mouseMode"] == ViewBoxWithCursor.CursorMode:
             self.mouseModes[1].setChecked(True)
-        else:
-            self.mouseModes[2].setChecked(True)
 
         self.valid = True
 
@@ -74,6 +110,12 @@ class ViewBoxMenu(QtWidgets.QMenu):
 
     def set_mouse_mode(self, mode):
         self.view().setLeftButtonAction(mode)
+
+    def set_x_zoom_mode(self, on_cursor=True):
+        self._settings.setValue("zoom_x_center_on_cursor", on_cursor)
+
+    def set_y_zoom_mode(self, on_cursor=True):
+        self._settings.setValue("zoom_y_center_on_cursor", on_cursor)
 
 
 class ViewBoxWithCursor(pg.ViewBox):
@@ -86,30 +128,31 @@ class ViewBoxWithCursor(pg.ViewBox):
     sigZoomFinished = QtCore.Signal(object)
 
     X_zoom = QtCore.QKeyCombination(
-        QtCore.Qt.ShiftModifier,
-        QtCore.Qt.Key_Shift,
+        QtCore.Qt.KeyboardModifier.ShiftModifier,
+        QtCore.Qt.Key.Key_Shift,
     ).toCombined()
 
     Y_zoom = QtCore.QKeyCombination(
-        QtCore.Qt.AltModifier,
-        QtCore.Qt.Key_Alt,
+        QtCore.Qt.KeyboardModifier.AltModifier,
+        QtCore.Qt.Key.Key_Alt,
     ).toCombined()
 
     XY_zoom = (
         QtCore.QKeyCombination(
-            QtCore.Qt.ShiftModifier | QtCore.Qt.AltModifier,
-            QtCore.Qt.Key_Alt,
+            QtCore.Qt.KeyboardModifier.ShiftModifier | QtCore.Qt.KeyboardModifier.AltModifier,
+            QtCore.Qt.Key.Key_Alt,
         ).toCombined(),
         QtCore.QKeyCombination(
-            QtCore.Qt.ShiftModifier | QtCore.Qt.AltModifier,
-            QtCore.Qt.Key_Shift,
+            QtCore.Qt.KeyboardModifier.ShiftModifier | QtCore.Qt.KeyboardModifier.AltModifier,
+            QtCore.Qt.Key.Key_Shift,
         ).toCombined(),
     )
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, plot, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
         self.menu.setParent(None)
+        self.menu.deleteLater()
         self.menu = None
         self.menu = ViewBoxMenu(self)
 
@@ -118,8 +161,13 @@ class ViewBoxWithCursor(pg.ViewBox):
         self._matrixNeedsUpdate = True
         self.updateMatrix()
 
+        self.cursor = None
+        self.plot = plot
+
+        self._settings = QtCore.QSettings()
+
     def __repr__(self):
-        return "ASAM ViewbOx"
+        return "ASAM ViewBox"
 
     def setMouseMode(self, mode):
         """
@@ -164,18 +212,28 @@ class ViewBoxWithCursor(pg.ViewBox):
         if axis is not None:
             mask[1 - axis] = 0.0
 
-        if (
-            self.state["mouseMode"] == ViewBoxWithCursor.CursorMode
-            and not ignore_cursor
-        ):
-            self.sigCursorMoved.emit(ev)
-            if self.zoom_start is not None:
-                end = self.mapSceneToView(ev.scenePos())
-                self.sigZoomChanged.emit((self.zoom_start, end, self.zoom))
-                if ev.isFinish():
-                    self.sigZoomFinished.emit((self.zoom_start, end, self.zoom))
-                    self.zoom_start = None
-                    self.sigZoomChanged.emit(None)
+        if self.state["mouseMode"] == ViewBoxWithCursor.CursorMode and not ignore_cursor:
+            if ev.button() == QtCore.Qt.MouseButton.LeftButton:
+                self.sigCursorMoved.emit(ev)
+                if self.zoom_start is not None:
+                    end = self.mapSceneToView(ev.scenePos())
+                    self.sigZoomChanged.emit((self.zoom_start, end, self.zoom))
+                    if ev.isFinish():
+                        self.sigZoomFinished.emit((self.zoom_start, end, self.zoom))
+                        self.zoom_start = None
+                        self.sigZoomChanged.emit(None)
+
+            else:
+                tr = self.childGroup.transform()
+                tr = fn.invertQTransform(tr)
+                tr = tr.map(dif * mask) - tr.map(pg.Point(0, 0))
+
+                x = tr.x() if mask[0] == 1 else None
+
+                self._resetTarget()
+                if x is not None:
+                    self.translateBy(x=x, y=0)
+                self.sigRangeChangedManually.emit(self.state["mouseEnabled"])
 
         else:
             ## Scale or translate based on mouse button
@@ -210,9 +268,7 @@ class ViewBoxWithCursor(pg.ViewBox):
                 x = s[0] if mouseEnabled[0] == 1 else None
                 y = s[1] if mouseEnabled[1] == 1 else None
 
-                center = pg.Point(
-                    tr.map(ev.buttonDownPos(QtCore.Qt.MouseButton.RightButton))
-                )
+                center = pg.Point(tr.map(ev.buttonDownPos(QtCore.Qt.MouseButton.RightButton)))
                 self._resetTarget()
                 self.scaleBy(x=x, y=y, center=center)
                 self.sigRangeChangedManually.emit(self.state["mouseEnabled"])
@@ -255,20 +311,40 @@ class ViewBoxWithCursor(pg.ViewBox):
             else:
                 mask = self.state["mouseEnabled"][:]
 
-        s = 1.02 ** (
-            ev.delta() * self.state["wheelScaleFactor"]
-        )  # actual scaling factor
+        pos = ev.pos()
+
+        if self._settings.value("zoom_y_center_on_cursor", True, type=bool):
+            y_pos_val, sig_y_top, sig_y_bottom = self.plot.value_at_cursor()
+
+            if isinstance(y_pos_val, (int, float)):
+                ratio = (sig_y_top - y_pos_val) / (sig_y_top - sig_y_bottom)
+
+                rect = self.boundingRect()
+
+                y_coord = (rect.height() - rect.y()) * ratio
+                pos.setY(y_coord)
+
+        s = 1.02 ** (ev.delta() * self.state["wheelScaleFactor"])  # actual scaling factor
 
         s = [(None if m is False else s) for m in mask]
-        center = pg.Point(
-            fn.invertQTransform(self.childGroup.transform()).map(ev.pos())
-        )
+        if any(np.isnan(v) for v in s if v is not None):
+            return
+
+        center = pg.Point(fn.invertQTransform(self.childGroup.transform()).map(pos))
 
         self._resetTarget()
         self.scaleBy(s, center)
+
+        if (
+            self._settings.value("zoom_x_center_on_cursor", True, type=bool)
+            and self.cursor is not None
+            and self.cursor.isVisible()
+        ):
+            x_range, _ = self.viewRange()
+            delta = x_range[1] - x_range[0]
+
+            pos = self.cursor.value()
+            self.setXRange(pos - delta / 2, pos + delta / 2, padding=0)
+
         ev.accept()
         self.sigRangeChangedManually.emit(mask)
-
-    sigCursorMoved = QtCore.Signal(object)
-    sigZoomChanged = QtCore.Signal(object)
-    sigZoomFinished = QtCore.Signal(object)

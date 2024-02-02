@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 #
 # this file contains substantial amount of code from https://github.com/adamerose/PandasGUI which is licensed as MIT:
 #
@@ -41,14 +40,16 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 Qt = QtCore.Qt
 
-from ...blocks.utils import csv_bytearray2hex, pandas_query_compatible
+from ...blocks.utils import (
+    csv_bytearray2hex,
+    extract_mime_names,
+    pandas_query_compatible,
+)
 from ...mdf import MDF
 from ..dialogs.range_editor import RangeEditor
-from ..ui import resource_rc
 from ..ui.tabular import Ui_TabularDisplay
 from ..utils import (
     copy_ranges,
-    extract_mime_names,
     FONT_SIZE,
     get_colors_using_ranges,
     run_thread_with_progress,
@@ -199,23 +200,17 @@ class DataFrameStorage:
                 next_sort_state = "None"
 
         if next_sort_state == "Asc":
-            self.df_unfiltered = self.df_unfiltered.sort_values(
-                col_name, ascending=True, kind="mergesort"
-            )
+            self.df_unfiltered = self.df_unfiltered.sort_values(col_name, ascending=True, kind="mergesort")
             self.sorted_column_name = self.df_unfiltered.columns[ix]
             self.sort_state = "Asc"
 
         elif next_sort_state == "Desc":
-            self.df_unfiltered = self.df_unfiltered.sort_values(
-                col_name, ascending=False, kind="mergesort"
-            )
+            self.df_unfiltered = self.df_unfiltered.sort_values(col_name, ascending=False, kind="mergesort")
             self.sorted_column_name = self.df_unfiltered.columns[ix]
             self.sort_state = "Desc"
 
         elif next_sort_state == "None":
-            self.df_unfiltered = self.df_unfiltered.sort_index(
-                ascending=True, kind="mergesort"
-            )
+            self.df_unfiltered = self.df_unfiltered.sort_index(ascending=True, kind="mergesort")
             self.sorted_column_name = None
             self.sort_state = "None"
 
@@ -225,25 +220,19 @@ class DataFrameStorage:
     def sort_index(self, ix: int):
         # Clicked an unsorted index level
         if ix != self.sorted_index_level:
-            self.df_unfiltered = self.df_unfiltered.sort_index(
-                level=ix, ascending=True, kind="mergesort"
-            )
+            self.df_unfiltered = self.df_unfiltered.sort_index(level=ix, ascending=True, kind="mergesort")
             self.sorted_index_level = ix
             self.sort_state = "Asc"
 
         # Clicked a sorted index level
         elif ix == self.sorted_index_level and self.sort_state == "Asc":
-            self.df_unfiltered = self.df_unfiltered.sort_index(
-                level=ix, ascending=False, kind="mergesort"
-            )
+            self.df_unfiltered = self.df_unfiltered.sort_index(level=ix, ascending=False, kind="mergesort")
             self.sorted_index_level = ix
             self.sort_state = "Desc"
 
         # Clicked a reverse sorted index level - reset to sorted by full index
         elif ix == self.sorted_index_level:
-            self.df_unfiltered = self.df_unfiltered.sort_index(
-                ascending=True, kind="mergesort"
-            )
+            self.df_unfiltered = self.df_unfiltered.sort_index(ascending=True, kind="mergesort")
 
             self.sorted_index_level = None
             self.sort_state = "None"
@@ -302,7 +291,7 @@ class DataTableModel(QtCore.QAbstractTableModel):
         return len(self.pgdf.df)
 
     # Returns the data from the DataFrame
-    def data(self, index, role=QtCore.Qt.DisplayRole):
+    def data(self, index, role=QtCore.Qt.ItemDataRole.DisplayRole):
         row = index.row()
         col = index.column()
 
@@ -310,18 +299,18 @@ class DataTableModel(QtCore.QAbstractTableModel):
 
         name = self.pgdf.df_unfiltered.columns[col]
 
-        if role == QtCore.Qt.DisplayRole:
+        if role == QtCore.Qt.ItemDataRole.DisplayRole:
             # Need to check type since a cell might contain a list or Series, then .isna returns a Series not a bool
             cell_is_na = pd.isna(cell)
 
             if type(cell_is_na) == bool and cell_is_na:
-                return "●"
+                return "NaN"
             elif isinstance(cell, (bytes, np.bytes_)):
                 return cell.decode("utf-8", "replace")
             else:
                 return value_as_str(cell, self.format, None, self.float_precision)
 
-        elif role == QtCore.Qt.BackgroundRole:
+        elif role == QtCore.Qt.ItemDataRole.BackgroundRole:
             channel_ranges = self.pgdf.tabular.ranges[name]
 
             try:
@@ -336,13 +325,9 @@ class DataTableModel(QtCore.QAbstractTableModel):
                 default_font_color=self.font_color,
             )
 
-            return (
-                new_background_color
-                if new_background_color != self.background_color
-                else None
-            )
+            return new_background_color if new_background_color != self.background_color else None
 
-        elif role == QtCore.Qt.ForegroundRole:
+        elif role == QtCore.Qt.ItemDataRole.ForegroundRole:
             channel_ranges = self.pgdf.tabular.ranges[name]
 
             try:
@@ -359,21 +344,19 @@ class DataTableModel(QtCore.QAbstractTableModel):
 
             return new_font_color if new_font_color != self.font_color else None
 
-        elif role == QtCore.Qt.TextAlignmentRole:
+        elif role == QtCore.Qt.ItemDataRole.TextAlignmentRole:
             if isinstance(cell, str):
-                return int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+                return int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
             elif isinstance(cell, pd.Timestamp):
-                return int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+                return int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
             else:
-                if self.float_precision == -1 and isinstance(
-                    cell, (float, np.floating)
-                ):
-                    return int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+                if self.float_precision == -1 and isinstance(cell, (float, np.floating)):
+                    return int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
                 else:
-                    return int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                    return int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
 
     def flags(self, index):
-        return QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable
+        return QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable
 
     def setData(self, index, value, role=None):
         pass
@@ -387,8 +370,8 @@ class DataTableView(QtWidgets.QTableView):
         self.dataframe_viewer = parent
         self.pgdf = parent.pgdf
 
-        self._backgrund_color = self.palette().color(QtGui.QPalette.Window)
-        self._font_color = self.palette().color(QtGui.QPalette.WindowText)
+        self._backgrund_color = self.palette().color(QtGui.QPalette.ColorRole.Window)
+        self._font_color = self.palette().color(QtGui.QPalette.ColorRole.WindowText)
 
         # Create and set model
         model = DataTableModel(parent, self._backgrund_color, self._font_color)
@@ -404,15 +387,15 @@ class DataTableView(QtWidgets.QTableView):
         # Settings
         # self.setWordWrap(True)
         # self.resizeRowsToContents()
-        self.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
-        self.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+        self.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
 
         font = QtGui.QFont()
         font.fromString(MONOSPACE_FONT)
         self.setFont(font)
 
         self.setAcceptDrops(False)
-        self.setDragDropMode(self.NoDragDrop)
+        self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.NoDragDrop)
         self.setDropIndicatorShown(False)
 
     def on_selectionChanged(self):
@@ -432,16 +415,15 @@ class DataTableView(QtWidgets.QTableView):
             selection = self.selectionModel().selection()
             columnHeader.selectionModel().select(
                 selection,
-                QtCore.QItemSelectionModel.Columns
-                | QtCore.QItemSelectionModel.ClearAndSelect,
+                QtCore.QItemSelectionModel.SelectionFlag.Columns
+                | QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect,
             )
 
         if not indexHeader.hasFocus():
             selection = self.selectionModel().selection()
             indexHeader.selectionModel().select(
                 selection,
-                QtCore.QItemSelectionModel.Rows
-                | QtCore.QItemSelectionModel.ClearAndSelect,
+                QtCore.QItemSelectionModel.SelectionFlag.Rows | QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect,
             )
 
     def sizeHint(self):
@@ -479,23 +461,17 @@ class DataTableView(QtWidgets.QTableView):
         key = event.key()
         modifiers = event.modifiers()
 
-        if key == QtCore.Qt.Key_R and modifiers == QtCore.Qt.ControlModifier:
-            selected_items = set(
-                index.column() for index in self.selectedIndexes() if index.isValid()
-            )
+        if key == QtCore.Qt.Key.Key_R and modifiers == QtCore.Qt.KeyboardModifier.ControlModifier:
+            event.accept()
+            selected_items = {index.column() for index in self.selectedIndexes() if index.isValid()}
 
             if selected_items:
+                ranges = []
                 for index in selected_items:
                     original_name = self.pgdf.df_unfiltered.columns[index]
-                    ranges = self.pgdf.tabular.ranges[original_name]
-                    if ranges:
-                        break
-                else:
-                    ranges = []
+                    ranges.update(self.pgdf.tabular.ranges[original_name])
 
-                dlg = RangeEditor(
-                    "<selected signals>", "", ranges=ranges, parent=self, brush=True
-                )
+                dlg = RangeEditor("<selected signals>", "", ranges=ranges, parent=self, brush=True)
                 dlg.exec_()
                 if dlg.pressed_button == "apply":
                     ranges = dlg.result
@@ -516,23 +492,23 @@ class HeaderModel(QtCore.QAbstractTableModel):
         self.prefix = ""
 
     def columnCount(self, parent=None):
-        if self.orientation == Qt.Horizontal:
+        if self.orientation == Qt.Orientation.Horizontal:
             return self.pgdf.df.columns.shape[0]
         else:  # Vertical
             return self.pgdf.df.index.nlevels
 
     def rowCount(self, parent=None):
-        if self.orientation == Qt.Horizontal:
+        if self.orientation == Qt.Orientation.Horizontal:
             return self.pgdf.df.columns.nlevels
-        elif self.orientation == Qt.Vertical:
+        elif self.orientation == Qt.Orientation.Vertical:
             return self.pgdf.df.index.shape[0]
 
-    def data(self, index, role=QtCore.Qt.DisplayRole):
+    def data(self, index, role=QtCore.Qt.ItemDataRole.DisplayRole):
         row = index.row()
         col = index.column()
 
-        if role == QtCore.Qt.DisplayRole:
-            if self.orientation == Qt.Horizontal:
+        if role == QtCore.Qt.ItemDataRole.DisplayRole:
+            if self.orientation == Qt.Orientation.Horizontal:
                 if isinstance(self.pgdf.df.columns, pd.MultiIndex):
                     val = str(self.pgdf.df.columns[col][row])
                 else:
@@ -541,13 +517,13 @@ class HeaderModel(QtCore.QAbstractTableModel):
                 val = val[len(self.prefix) :] if val.startswith(self.prefix) else val
                 return val
 
-            elif self.orientation == Qt.Vertical:
+            elif self.orientation == Qt.Orientation.Vertical:
                 if isinstance(self.pgdf.df.index, pd.MultiIndex):
                     return str(self.pgdf.df.index[row][col])
                 else:
                     return str(self.pgdf.df.index[row])
 
-        elif role == QtCore.Qt.DecorationRole:
+        elif role == QtCore.Qt.ItemDataRole.DecorationRole:
             if self.pgdf.sort_state == "Asc":
                 icon = QtGui.QIcon(":/sort-ascending.png")
             elif self.pgdf.sort_state == "Desc":
@@ -558,27 +534,25 @@ class HeaderModel(QtCore.QAbstractTableModel):
             if (
                 col == self.pgdf.sorted_column_ix
                 and row == self.rowCount() - 1
-                and self.orientation == Qt.Horizontal
+                and self.orientation == Qt.Orientation.Horizontal
             ):
                 return icon
 
-        elif role == QtCore.Qt.TextAlignmentRole:
-            if self.orientation == Qt.Horizontal:
+        elif role == QtCore.Qt.ItemDataRole.TextAlignmentRole:
+            if self.orientation == Qt.Orientation.Horizontal:
                 name = self.pgdf.df_unfiltered.columns[col]
                 dtype = self.pgdf.df_unfiltered[name].values.dtype
 
-                float_precision = (
-                    self.pgdf.dataframe_viewer.dataView.model().float_precision
-                )
+                float_precision = self.pgdf.dataframe_viewer.dataView.model().float_precision
 
                 if np.issubdtype(dtype, np.integer):
-                    return int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                    return int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
                 elif float_precision != -1 and np.issubdtype(dtype, np.floating):
-                    return int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                    return int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
                 else:
-                    return int(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+                    return int(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
             else:
-                return QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter
+                return QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
 
     # The headers of this table will show the level names of the MultiIndex
     def headerData(self, section, orientation, role=None):
@@ -595,9 +569,7 @@ class HeaderView(QtWidgets.QTableView):
         super().__init__(parent)
         self.dataframe_viewer = parent
         self.pgdf = parent.pgdf
-        self.setProperty(
-            "orientation", "horizontal" if orientation == 1 else "vertical"
-        )  # Used in stylesheet
+        self.setProperty("orientation", "horizontal" if orientation == 1 else "vertical")  # Used in stylesheet
 
         # Setup
         self.orientation = orientation
@@ -622,50 +594,44 @@ class HeaderView(QtWidgets.QTableView):
         # Settings
         self.setIconSize(QtCore.QSize(16, 16))
         self.setSizePolicy(
-            QtWidgets.QSizePolicy(
-                QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Maximum
-            )
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Policy.Maximum, QtWidgets.QSizePolicy.Policy.Maximum)
         )
         self.setWordWrap(False)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
-        self.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
         font = QtGui.QFont()
         font.fromString(MONOSPACE_FONT)
         font.setBold(True)
         self.setFont(font)
 
         # Link selection to DataTable
-        self.selectionModel().selectionChanged.connect(
-            lambda x: self.on_selectionChanged()
-        )
+        self.selectionModel().selectionChanged.connect(lambda x: self.on_selectionChanged())
         # self.set_spans()
 
         self.horizontalHeader().hide()
         self.verticalHeader().hide()
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         # Automatically stretch rows/columns as widget is resized
-        if self.orientation == Qt.Vertical:
-            self.horizontalHeader().setSectionResizeMode(
-                QtWidgets.QHeaderView.ResizeMode.Stretch
-            )
+        if self.orientation == Qt.Orientation.Vertical:
+            self.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
 
         # Set initial size
         self.resize(self.sizeHint())
 
     def showEvent(self, a0: QtGui.QShowEvent) -> None:
-        super(HeaderView, self).showEvent(a0)
+        super().showEvent(a0)
         self.initial_size = self.size()
 
     def mouseDoubleClickEvent(self, event):
         point = event.pos()
         ix = self.indexAt(point)
         col = ix.column()
-        if event.button() == QtCore.Qt.LeftButton:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
             # When a header is clicked, sort the DataFrame by that column
-            if self.orientation == Qt.Horizontal:
+            if self.orientation == Qt.Orientation.Horizontal:
                 self.pgdf.sort_column(col)
             else:
                 self.on_selectionChanged()
@@ -676,10 +642,7 @@ class HeaderView(QtWidgets.QTableView):
         point = event.pos()
         ix = self.indexAt(point)
         col = ix.column()
-        if (
-            event.button() == QtCore.Qt.RightButton
-            and self.orientation == Qt.Horizontal
-        ):
+        if event.button() == QtCore.Qt.MouseButton.RightButton and self.orientation == Qt.Orientation.Horizontal:
             self.dataframe_viewer.show_column_menu(col)
         else:
             super().mousePressEvent(event)
@@ -695,9 +658,7 @@ class HeaderView(QtWidgets.QTableView):
             dataView = self.dataframe_viewer.dataView
 
             # Set selection mode so selecting one row or column at a time adds to selection each time
-            if (
-                self.orientation == Qt.Horizontal
-            ):  # This case is for the horizontal header
+            if self.orientation == Qt.Orientation.Horizontal:  # This case is for the horizontal header
                 # Get the header's selected columns
                 selection = self.selectionModel().selection()
 
@@ -708,15 +669,15 @@ class HeaderView(QtWidgets.QTableView):
                     self.model().index(0, 0),
                     self.model().index(last_row_ix - 1, last_col_ix),
                 )
-                selection.merge(higher_levels, QtCore.QItemSelectionModel.Deselect)
+                selection.merge(higher_levels, QtCore.QItemSelectionModel.SelectionFlag.Deselect)
 
                 # Select the cells in the data view
                 dataView.selectionModel().select(
                     selection,
-                    QtCore.QItemSelectionModel.Columns
-                    | QtCore.QItemSelectionModel.ClearAndSelect,
+                    QtCore.QItemSelectionModel.SelectionFlag.Columns
+                    | QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect,
                 )
-            if self.orientation == Qt.Vertical:
+            if self.orientation == Qt.Orientation.Vertical:
                 selection = self.selectionModel().selection()
 
                 last_row_ix = self.model().rowCount() - 1
@@ -725,12 +686,12 @@ class HeaderView(QtWidgets.QTableView):
                     self.model().index(0, 0),
                     self.model().index(last_row_ix, last_col_ix - 1),
                 )
-                selection.merge(higher_levels, QtCore.QItemSelectionModel.Deselect)
+                selection.merge(higher_levels, QtCore.QItemSelectionModel.SelectionFlag.Deselect)
 
                 dataView.selectionModel().select(
                     selection,
-                    QtCore.QItemSelectionModel.Rows
-                    | QtCore.QItemSelectionModel.ClearAndSelect,
+                    QtCore.QItemSelectionModel.SelectionFlag.Rows
+                    | QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect,
                 )
 
         self.selectAbove()
@@ -741,7 +702,7 @@ class HeaderView(QtWidgets.QTableView):
         # Disabling this to allow selecting specific cells in headers
         return
 
-        if self.orientation == Qt.Horizontal:
+        if self.orientation == Qt.Orientation.Horizontal:
             if self.pgdf.df.columns.nlevels == 1:
                 return
         else:
@@ -749,27 +710,23 @@ class HeaderView(QtWidgets.QTableView):
                 return
 
         for ix in self.selectedIndexes():
-            if self.orientation == Qt.Horizontal:
+            if self.orientation == Qt.Orientation.Horizontal:
                 # Loop over the rows above this one
                 for row in range(ix.row()):
                     ix2 = self.model().index(row, ix.column())
-                    self.setSelection(
-                        self.visualRect(ix2), QtCore.QItemSelectionModel.Select
-                    )
+                    self.setSelection(self.visualRect(ix2), QtCore.QItemSelectionModel.SelectionFlag.Select)
             else:
                 # Loop over the columns left of this one
                 for col in range(ix.column()):
                     ix2 = self.model().index(ix.row(), col)
-                    self.setSelection(
-                        self.visualRect(ix2), QtCore.QItemSelectionModel.Select
-                    )
+                    self.setSelection(self.visualRect(ix2), QtCore.QItemSelectionModel.SelectionFlag.Select)
 
     # This sets spans to group together adjacent cells with the same values
     def set_spans(self):
         df = self.pgdf.df
         self.clearSpans()
         # Find spans for horizontal HeaderView
-        if self.orientation == Qt.Horizontal:
+        if self.orientation == Qt.Orientation.Horizontal:
             # Find how many levels the MultiIndex has
             if isinstance(df.columns, pd.MultiIndex):
                 N = len(df.columns[0])
@@ -842,10 +799,10 @@ class HeaderView(QtWidgets.QTableView):
 
     def eventFilter(self, object: QtCore.QObject, event: QtCore.QEvent):
         if event.type() in [
-            QtCore.QEvent.MouseButtonPress,
-            QtCore.QEvent.MouseButtonRelease,
-            QtCore.QEvent.MouseButtonDblClick,
-            QtCore.QEvent.MouseMove,
+            QtCore.QEvent.Type.MouseButtonPress,
+            QtCore.QEvent.Type.MouseButtonRelease,
+            QtCore.QEvent.Type.MouseButtonDblClick,
+            QtCore.QEvent.Type.MouseMove,
         ]:
             return self.manage_resizing(object, event)
 
@@ -859,7 +816,7 @@ class HeaderView(QtWidgets.QTableView):
         # mouse_position is the position along the relevant axis, ie. horizontal x position for the top header
         def over_header_cell_edge(mouse_position, margin=3):
             # Return the index of the column this x position is on the right edge of
-            if self.orientation == Qt.Horizontal:
+            if self.orientation == Qt.Orientation.Horizontal:
                 x = mouse_position
                 if self.columnAt(x - margin) != self.columnAt(x + margin):
                     if self.columnAt(x + margin) == 0:
@@ -871,7 +828,7 @@ class HeaderView(QtWidgets.QTableView):
                     return None
 
             # Return the index of the row this y position is on the top edge of
-            elif self.orientation == Qt.Vertical:
+            elif self.orientation == Qt.Orientation.Vertical:
                 y = mouse_position
                 if self.rowAt(y - margin) != self.rowAt(y + margin):
                     if self.rowAt(y + margin) == 0:
@@ -885,13 +842,13 @@ class HeaderView(QtWidgets.QTableView):
         # This is used for resizing the left header width or the top header height
         # Returns a boolean indicating whether the mouse is over the header edge to allow resizing
         def over_header_edge(mouse_position: QtCore.QPoint(), margin=7) -> bool:
-            if self.orientation == Qt.Horizontal:
+            if self.orientation == Qt.Orientation.Horizontal:
                 return abs(mouse_position - self.height()) < margin
-            elif self.orientation == Qt.Vertical:
+            elif self.orientation == Qt.Orientation.Vertical:
                 return abs(mouse_position - self.width()) < margin
 
         # mouse_position is the position along the axis of the header. X pos for top header, Y pos for side header
-        if self.orientation == Qt.Horizontal:
+        if self.orientation == Qt.Orientation.Horizontal:
             mouse_position = event.pos().x()
             orthogonal_mouse_position = event.pos().y()
         else:
@@ -900,80 +857,71 @@ class HeaderView(QtWidgets.QTableView):
 
         # Set the cursor shape
         if over_header_cell_edge(mouse_position) is not None:
-            if self.orientation == Qt.Horizontal:
-                self.viewport().setCursor(QtGui.QCursor(Qt.SplitHCursor))
-            elif self.orientation == Qt.Vertical:
-                self.viewport().setCursor(QtGui.QCursor(Qt.SplitVCursor))
+            if self.orientation == Qt.Orientation.Horizontal:
+                self.viewport().setCursor(QtGui.QCursor(Qt.CursorShape.SplitHCursor))
+            elif self.orientation == Qt.Orientation.Vertical:
+                self.viewport().setCursor(QtGui.QCursor(Qt.CursorShape.SplitVCursor))
 
         elif over_header_edge(orthogonal_mouse_position):
-            if self.orientation == Qt.Horizontal:
+            if self.orientation == Qt.Orientation.Horizontal:
                 # Disabling vertical resizing of top header for now
                 pass
-                # self.viewport().setCursor(QtGui.QCursor(Qt.SplitVCursor))
-            elif self.orientation == Qt.Vertical:
-                self.viewport().setCursor(QtGui.QCursor(Qt.SplitHCursor))
+                # self.viewport().setCursor(QtGui.QCursor(Qt.CursorShape.SplitVCursor))
+            elif self.orientation == Qt.Orientation.Vertical:
+                self.viewport().setCursor(QtGui.QCursor(Qt.CursorShape.SplitHCursor))
 
         else:
-            self.viewport().setCursor(QtGui.QCursor(Qt.ArrowCursor))
+            self.viewport().setCursor(QtGui.QCursor(Qt.CursorShape.ArrowCursor))
 
         # If mouse is on an edge, start the drag resize process
-        if event.type() == QtCore.QEvent.MouseButtonPress:
+        if event.type() == QtCore.QEvent.Type.MouseButtonPress:
             if over_header_cell_edge(mouse_position) is not None:
                 self.header_cell_being_resized = over_header_cell_edge(mouse_position)
                 return True
             # Disabling vertical resizing of top header for now
-            elif (
-                over_header_edge(orthogonal_mouse_position)
-                and self.orientation == Qt.Vertical
-            ):
+            elif over_header_edge(orthogonal_mouse_position) and self.orientation == Qt.Orientation.Vertical:
                 self.header_being_resized = True
                 return True
             else:
                 self.header_cell_being_resized = None
 
         # End the drag process
-        if event.type() == QtCore.QEvent.MouseButtonRelease:
+        if event.type() == QtCore.QEvent.Type.MouseButtonRelease:
             self.header_cell_being_resized = None
             self.header_being_resized = False
 
         # Auto size the column that was double clicked
-        if event.type() == QtCore.QEvent.MouseButtonDblClick:
+        if event.type() == QtCore.QEvent.Type.MouseButtonDblClick:
             # Find which column or row edge the mouse was over and auto size it
             if over_header_cell_edge(mouse_position) is not None:
                 header_index = over_header_cell_edge(mouse_position)
-                if self.orientation == Qt.Horizontal:
+                if self.orientation == Qt.Orientation.Horizontal:
                     self.dataframe_viewer.auto_size_column(header_index)
-                elif self.orientation == Qt.Vertical:
+                elif self.orientation == Qt.Orientation.Vertical:
                     self.dataframe_viewer.auto_size_row(header_index)
                 return True
 
         # Handle drag resizing
-        if event.type() == QtCore.QEvent.MouseMove:
+        if event.type() == QtCore.QEvent.Type.MouseMove:
             # If this is None, there is no drag resize happening
             if self.header_cell_being_resized is not None:
-                size = mouse_position - self.columnViewportPosition(
-                    self.header_cell_being_resized
-                )
+                size = mouse_position - self.columnViewportPosition(self.header_cell_being_resized)
                 if size > 10:
-                    if self.orientation == Qt.Horizontal:
+                    if self.orientation == Qt.Orientation.Horizontal:
                         self.setColumnWidth(self.header_cell_being_resized, size)
-                        self.dataframe_viewer.dataView.setColumnWidth(
-                            self.header_cell_being_resized, size
-                        )
-                    if self.orientation == Qt.Vertical:
+                        self.dataframe_viewer.dataView.setColumnWidth(self.header_cell_being_resized, size)
+                    if self.orientation == Qt.Orientation.Vertical:
                         self.setRowHeight(self.header_cell_being_resized, size)
-                        self.dataframe_viewer.dataView.setRowHeight(
-                            self.header_cell_being_resized, size
-                        )
+                        self.dataframe_viewer.dataView.setRowHeight(self.header_cell_being_resized, size)
 
                     self.updateGeometry()
                     self.dataframe_viewer.dataView.updateGeometry()
                 return True
             elif self.header_being_resized:
-                if self.orientation == Qt.Horizontal:
+                if self.orientation == Qt.Orientation.Horizontal:
                     size = orthogonal_mouse_position - self.geometry().top()
                     self.setFixedHeight(max(size, self.initial_size.height()))
-                if self.orientation == Qt.Vertical:
+                if self.orientation == Qt.Orientation.Vertical:
                     size = orthogonal_mouse_position - self.geometry().left()
                     self.setFixedWidth(max(size, self.initial_size.width()))
 
@@ -985,7 +933,7 @@ class HeaderView(QtWidgets.QTableView):
     # Return the size of the header needed to match the corresponding DataTableView
     def sizeHint(self):
         # Columm headers
-        if self.orientation == Qt.Horizontal:
+        if self.orientation == Qt.Orientation.Horizontal:
             # Width of DataTableView
             width = self.table.sizeHint().width() + self.verticalHeader().width()
             # Height
@@ -1006,7 +954,7 @@ class HeaderView(QtWidgets.QTableView):
 
     # This is needed because otherwise when the horizontal header is a single row it will add whitespace to be bigger
     def minimumSizeHint(self):
-        if self.orientation == Qt.Horizontal:
+        if self.orientation == Qt.Orientation.Horizontal:
             return QtCore.QSize(0, self.sizeHint().height())
         else:
             return QtCore.QSize(self.sizeHint().width(), 0)
@@ -1020,23 +968,23 @@ class HeaderNamesModel(QtCore.QAbstractTableModel):
         self.prefix = ""
 
     def columnCount(self, parent=None):
-        if self.orientation == Qt.Horizontal:
+        if self.orientation == Qt.Orientation.Horizontal:
             return 1
-        elif self.orientation == Qt.Vertical:
+        elif self.orientation == Qt.Orientation.Vertical:
             return self.pgdf.df.index.nlevels
 
     def rowCount(self, parent=None):
-        if self.orientation == Qt.Horizontal:
+        if self.orientation == Qt.Orientation.Horizontal:
             return self.pgdf.df.columns.nlevels
-        elif self.orientation == Qt.Vertical:
+        elif self.orientation == Qt.Orientation.Vertical:
             return 1
 
-    def data(self, index, role=QtCore.Qt.DisplayRole):
+    def data(self, index, role=QtCore.Qt.ItemDataRole.DisplayRole):
         row = index.row()
         col = index.column()
 
-        if role == QtCore.Qt.DisplayRole:
-            if self.orientation == Qt.Horizontal:
+        if role == QtCore.Qt.ItemDataRole.DisplayRole:
+            if self.orientation == Qt.Orientation.Horizontal:
                 val = self.pgdf.df.columns.names[row]
                 if val is None:
                     val = ""
@@ -1044,13 +992,13 @@ class HeaderNamesModel(QtCore.QAbstractTableModel):
                 val = val[len(self.prefix) :] if val.startswith(self.prefix) else val
                 return str(val)
 
-            elif self.orientation == Qt.Vertical:
+            elif self.orientation == Qt.Orientation.Vertical:
                 val = self.pgdf.df.index.names[col]
                 if val is None:
                     val = "Index"
                 return str(val)
 
-        elif role == QtCore.Qt.DecorationRole:
+        elif role == QtCore.Qt.ItemDataRole.DecorationRole:
             if self.pgdf.sort_state == "Asc":
                 icon = QtGui.QIcon(":/sort-ascending.png")
             elif self.pgdf.sort_state == "Desc":
@@ -1058,11 +1006,11 @@ class HeaderNamesModel(QtCore.QAbstractTableModel):
             else:
                 return
 
-            if col == self.pgdf.sorted_index_level and self.orientation == Qt.Vertical:
+            if col == self.pgdf.sorted_index_level and self.orientation == Qt.Orientation.Vertical:
                 return icon
 
-        elif role == QtCore.Qt.TextAlignmentRole:
-            return int(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        elif role == QtCore.Qt.ItemDataRole.TextAlignmentRole:
+            return int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
 
 
 class HeaderNamesView(QtWidgets.QTableView):
@@ -1071,34 +1019,28 @@ class HeaderNamesView(QtWidgets.QTableView):
         self.dataframe_viewer = parent
         self.pgdf = parent.pgdf
 
-        self.setProperty(
-            "orientation", "horizontal" if orientation == 1 else "vertical"
-        )  # Used in stylesheet
+        self.setProperty("orientation", "horizontal" if orientation == 1 else "vertical")  # Used in stylesheet
 
         # Setup
         self.orientation = orientation
         self.setModel(HeaderNamesModel(parent, orientation))
 
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-        self.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
-        self.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+        self.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
 
         self.horizontalHeader().hide()
         self.verticalHeader().hide()
 
-        self.setSelectionMode(self.NoSelection)
+        self.setSelectionMode(self.SelectionMode.NoSelection)
 
         # Automatically stretch rows/columns as widget is resized
-        if self.orientation == Qt.Horizontal:
-            self.verticalHeader().setSectionResizeMode(
-                QtWidgets.QHeaderView.ResizeMode.Stretch
-            )
+        if self.orientation == Qt.Orientation.Horizontal:
+            self.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         else:
-            self.horizontalHeader().setSectionResizeMode(
-                QtWidgets.QHeaderView.ResizeMode.Stretch
-            )
+            self.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
 
         font = QtGui.QFont()
         font.fromString(MONOSPACE_FONT)
@@ -1109,20 +1051,20 @@ class HeaderNamesView(QtWidgets.QTableView):
     def mouseDoubleClickEvent(self, event):
         point = event.pos()
         ix = self.indexAt(point)
-        if event.button() == QtCore.Qt.LeftButton:
-            if self.orientation == Qt.Vertical:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            if self.orientation == Qt.Orientation.Vertical:
                 self.pgdf.sort_index(ix.column())
         else:
             super().mouseDoubleClickEvent(event)
 
     def init_size(self):
         # Match vertical header name widths to vertical header
-        if self.orientation == Qt.Vertical:
+        if self.orientation == Qt.Orientation.Vertical:
             for ix in range(self.model().columnCount()):
                 self.setColumnWidth(ix, self.columnWidth(ix))
 
     def sizeHint(self):
-        if self.orientation == Qt.Horizontal:
+        if self.orientation == Qt.Orientation.Horizontal:
             width = self.columnWidth(0)
             height = 24
         else:  # Vertical
@@ -1138,7 +1080,7 @@ class HeaderNamesView(QtWidgets.QTableView):
         return self.dataframe_viewer.columnHeader.rowHeight(row)
 
     def columnWidth(self, column: int) -> int:
-        if self.orientation == Qt.Horizontal:
+        if self.orientation == Qt.Orientation.Horizontal:
             if all(name is None for name in self.pgdf.df.columns.names):
                 return 0
             else:
@@ -1157,9 +1099,7 @@ class ColumnMenu(QtWidgets.QMenu):
         ########################
         # Info
         idx = self.pgdf.dataframe_viewer.columnHeader.model().index(0, column_ix)
-        self.name = self.pgdf.dataframe_viewer.columnHeader.model().data(
-            idx, role=QtCore.Qt.DisplayRole
-        )
+        self.name = self.pgdf.dataframe_viewer.columnHeader.model().data(idx, role=QtCore.Qt.ItemDataRole.DisplayRole)
         label = QtWidgets.QLabel(self.name)
         font = QtGui.QFont()
         font.setBold(True)
@@ -1174,33 +1114,18 @@ class ColumnMenu(QtWidgets.QMenu):
         self.add_widget(QtWidgets.QLabel("Set sorting"))
 
         def select_button():
-            self.sort_b1.setDown(
-                self.pgdf.sort_state == "Asc"
-                and self.pgdf.sorted_column_ix == column_ix
-            )
-            self.sort_b2.setDown(
-                self.pgdf.sort_state == "Desc"
-                and self.pgdf.sorted_column_ix == column_ix
-            )
-            self.sort_b3.setDown(
-                self.pgdf.sort_state == "None"
-                or self.pgdf.sorted_column_ix != column_ix
-            )
+            self.sort_b1.setDown(self.pgdf.sort_state == "Asc" and self.pgdf.sorted_column_ix == column_ix)
+            self.sort_b2.setDown(self.pgdf.sort_state == "Desc" and self.pgdf.sorted_column_ix == column_ix)
+            self.sort_b3.setDown(self.pgdf.sort_state == "None" or self.pgdf.sorted_column_ix != column_ix)
 
         self.sort_b1 = QtWidgets.QPushButton("Asc")
-        self.sort_b1.clicked.connect(
-            lambda: [self.pgdf.sort_column(self.column_ix, "Asc"), select_button()]
-        )
+        self.sort_b1.clicked.connect(lambda: [self.pgdf.sort_column(self.column_ix, "Asc"), select_button()])
 
         self.sort_b2 = QtWidgets.QPushButton("Desc")
-        self.sort_b2.clicked.connect(
-            lambda: [self.pgdf.sort_column(self.column_ix, "Desc"), select_button()]
-        )
+        self.sort_b2.clicked.connect(lambda: [self.pgdf.sort_column(self.column_ix, "Desc"), select_button()])
 
         self.sort_b3 = QtWidgets.QPushButton("None")
-        self.sort_b3.clicked.connect(
-            lambda: [self.pgdf.sort_column(self.column_ix, "None"), select_button()]
-        )
+        self.sort_b3.clicked.connect(lambda: [self.pgdf.sort_column(self.column_ix, "None"), select_button()])
 
         select_button()
 
@@ -1209,10 +1134,7 @@ class ColumnMenu(QtWidgets.QMenu):
         sort_control_layout.setSpacing(0)
         sort_control_layout.setContentsMargins(0, 0, 0, 0)
         sort_control.setLayout(sort_control_layout)
-        [
-            sort_control_layout.addWidget(w)
-            for w in [self.sort_b1, self.sort_b2, self.sort_b3]
-        ]
+        [sort_control_layout.addWidget(w) for w in [self.sort_b1, self.sort_b2, self.sort_b3]]
 
         self.add_widget(sort_control)
 
@@ -1343,9 +1265,7 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
             for name, ranges_ in ranges.items():
                 for range_info in ranges_:
                     range_info["font_color"] = fn.mkBrush(range_info["font_color"])
-                    range_info["background_color"] = fn.mkBrush(
-                        range_info["background_color"]
-                    )
+                    range_info["background_color"] = fn.mkBrush(range_info["background_color"])
                 self.ranges[name] = ranges_
 
         df = DataFrameStorage(df, self)
@@ -1366,9 +1286,7 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
         self.toggle_filters_btn.clicked.connect(self.toggle_filters)
         self.filters_group.setHidden(True)
 
-        self.float_precision.addItems(
-            ["Full float precision"] + [f"{i} float decimals" for i in range(16)]
-        )
+        self.float_precision.addItems(["Full float precision"] + [f"{i} float decimals" for i in range(16)])
         self.float_precision.setCurrentIndex(0)
         self.float_precision.currentIndexChanged.connect(self.float_precision_changed)
 
@@ -1385,9 +1303,7 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
     def current_changed(self, current, previous):
         if current.isValid():
             row = current.row()
-            self._filtered_ts_series = self._original_ts_series.reindex(
-                self.tree.pgdf.df.index
-            )
+            self._filtered_ts_series = self._original_ts_series.reindex(self.tree.pgdf.df.index)
             ts = float(self._filtered_ts_series.iloc[row])
             self.timestamp_changed_signal.emit(self, ts)
 
@@ -1396,17 +1312,13 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
             self.toggle_filters_btn.setText("Hide filters")
             self.filters_group.setHidden(False)
             icon = QtGui.QIcon()
-            icon.addPixmap(
-                QtGui.QPixmap(":/up.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-            )
+            icon.addPixmap(QtGui.QPixmap(":/up.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
             self.toggle_filters_btn.setIcon(icon)
         else:
             self.toggle_filters_btn.setText("Show filters")
             self.filters_group.setHidden(True)
             icon = QtGui.QIcon()
-            icon.addPixmap(
-                QtGui.QPixmap(":/down.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-            )
+            icon.addPixmap(QtGui.QPixmap(":/down.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
             self.toggle_filters_btn.setIcon(icon)
 
     def add_filter(self, event=None):
@@ -1449,7 +1361,7 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
 
         for i in range(count):
             filter = self.filters.itemWidget(self.filters.item(i))
-            if filter.enabled.checkState() == QtCore.Qt.Unchecked:
+            if filter.enabled.checkState() == QtCore.Qt.CheckState.Unchecked:
                 continue
 
             target = filter._target
@@ -1467,56 +1379,39 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
             column_name = pandas_query_compatible(column_name)
             op = filter.op.currentText()
 
-            if target != target:
-                # here we have NaN
-                nan = np.nan
-
+            if target != target:  # noqa: PLR0124
+                # target is NaN
+                _nan = np.nan  # used in pandas query
                 if op in (">", ">=", "<", "<="):
-                    filters.append(column_name)
-                    filters.append(op)
-                    filters.append("@nan")
+                    filters.extend((column_name, op, "@_nan"))
                 elif op == "!=":
-                    filters.append(column_name)
-                    filters.append("==")
-                    filters.append(column_name)
+                    filters.extend((column_name, "==", column_name))
                 elif op == "==":
-                    filters.append(column_name)
-                    filters.append("!=")
-                    filters.append(column_name)
+                    filters.extend((column_name, "!=", column_name))
             else:
                 if column_name == "timestamps" and df["timestamps"].dtype.kind == "M":
                     ts = pd.Timestamp(target, tz=LOCAL_TIMEZONE)
-                    ts = ts.tz_convert("UTC").to_datetime64()
+                    _ts = ts.tz_convert("UTC").to_datetime64()  # used in pandas query
 
-                    filters.append(column_name)
-                    filters.append(op)
-                    filters.append("@ts")
+                    filters.extend((column_name, op, "@_ts"))
 
                 elif is_byte_array:
                     target = str(target).replace(" ", "").strip('"')
 
                     if f"{column_name}__as__bytes" not in df.columns:
-                        df[f"{column_name}__as__bytes"] = pd.Series(
-                            [bytes(s) for s in df[column_name]], index=df.index
-                        )
-                    val = bytes.fromhex(target)
+                        df[f"{column_name}__as__bytes"] = pd.Series([bytes(s) for s in df[column_name]], index=df.index)
+                    _val = bytes.fromhex(target)  # used in pandas query
 
-                    filters.append(f"{column_name}__as__bytes")
-                    filters.append(op)
-                    filters.append("@val")
+                    filters.extend((f"{column_name}__as__bytes", op, "@_val"))
 
                 else:
-                    filters.append(column_name)
-                    filters.append(op)
-                    filters.append(str(target))
+                    filters.extend((column_name, op, str(target)))
 
         if filters:
             try:
                 new_df = df.query(" ".join(filters))
             except:
-                logger.exception(
-                    f'Failed to apply filter for tabular window: {" ".join(filters)}'
-                )
+                logger.exception(f'Failed to apply filter for tabular window: {" ".join(filters)}')
                 self.query.setText(format_exc())
             else:
                 to_drop = [name for name in df.columns if name.endswith("__as__bytes")]
@@ -1547,12 +1442,7 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
         signals.set_index(index, inplace=True)
         dropped = {}
 
-        ranges = {
-            name: channel_ranges
-            for name, channel_ranges in zip(
-                self.tree.pgdf.df_unfiltered.columns, self.ranges.values()
-            )
-        }
+        ranges = dict(zip(self.tree.pgdf.df_unfiltered.columns, self.ranges.values()))
 
         for name_ in signals.columns:
             col = signals[name_]
@@ -1585,9 +1475,7 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
 
                 elif col.dtype.name != "category":
                     try:
-                        dropped[name_] = pd.Series(
-                            csv_bytearray2hex(col), index=signals.index
-                        )
+                        dropped[name_] = pd.Series(csv_bytearray2hex(col), index=signals.index)
                     except:
                         pass
 
@@ -1595,13 +1483,9 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
 
             elif col.dtype.kind == "S":
                 try:
-                    dropped[name_] = pd.Series(
-                        npchar.decode(col, "utf-8"), index=signals.index
-                    )
+                    dropped[name_] = pd.Series(npchar.decode(col, "utf-8"), index=signals.index)
                 except:
-                    dropped[name_] = pd.Series(
-                        npchar.decode(col, "latin-1"), index=signals.index
-                    )
+                    dropped[name_] = pd.Series(npchar.decode(col, "latin-1"), index=signals.index)
                 self.signals_descr[name_] = 0
             else:
                 self.signals_descr[name_] = 0
@@ -1615,17 +1499,11 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
         names = list(signals.columns)
         names = [
             *[name for name in names if name.endswith((".ID", ".DataBytes"))],
-            *[
-                name
-                for name in names
-                if name != "timestamps" and not name.endswith((".ID", ".DataBytes"))
-            ],
+            *[name for name in names if name != "timestamps" and not name.endswith((".ID", ".DataBytes"))],
         ]
         signals = signals[names]
 
-        self.tree.pgdf.df_unfiltered = self.tree.pgdf.df = pd.concat(
-            [self.tree.pgdf.df_unfiltered, signals], axis=1
-        )
+        self.tree.pgdf.df_unfiltered = self.tree.pgdf.df = pd.concat([self.tree.pgdf.df_unfiltered, signals], axis=1)
         self.ranges = ranges
 
         if filtered:
@@ -1645,9 +1523,7 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
 
             for range_info in ranges:
                 range_info["font_color"] = range_info["font_color"].color().name()
-                range_info["background_color"] = (
-                    range_info["background_color"].color().name()
-                )
+                range_info["background_color"] = range_info["background_color"].color().name()
 
             pattern["ranges"] = ranges
 
@@ -1657,25 +1533,20 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
 
             for range_info in channel_ranges:
                 range_info["font_color"] = range_info["font_color"].color().name()
-                range_info["background_color"] = (
-                    range_info["background_color"].color().name()
-                )
+                range_info["background_color"] = range_info["background_color"].color().name()
 
             ranges[name] = channel_ranges
 
         config = {
             "sorted": True,
-            "channels": list(self.tree.pgdf.df_unfiltered.columns)
-            if not self.pattern
-            else [],
+            "channels": list(self.tree.pgdf.df_unfiltered.columns) if not self.pattern else [],
             "filtered": bool(self.query.toPlainText()),
-            "filters": [
-                self.filters.itemWidget(self.filters.item(i)).to_config()
-                for i in range(count)
-            ]
-            if not self.pattern
-            else [],
-            "time_as_date": self.time_as_date.checkState() == QtCore.Qt.Checked,
+            "filters": (
+                [self.filters.itemWidget(self.filters.item(i)).to_config() for i in range(count)]
+                if not self.pattern
+                else []
+            ),
+            "time_as_date": self.time_as_date.checkState() == QtCore.Qt.CheckState.Checked,
             "pattern": pattern,
             "format": self.format,
             "ranges": ranges,
@@ -1692,7 +1563,7 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
         s = self.start
         count = self.filters.count()
 
-        if state == QtCore.Qt.Checked:
+        if state == QtCore.Qt.CheckState.Checked:
             for i in range(count):
                 filter = self.filters.itemWidget(self.filters.item(i))
                 filter.dtype_kind[0] = "M"
@@ -1702,9 +1573,7 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
                 else:
                     filter.validate_target()
 
-            delta = pd.to_timedelta(
-                self.tree.pgdf.df_unfiltered["timestamps"], unit="s"
-            )
+            delta = pd.to_timedelta(self.tree.pgdf.df_unfiltered["timestamps"], unit="s")
 
             timestamps = self.start + delta
             self.tree.pgdf.df_unfiltered["timestamps"] = timestamps
@@ -1726,7 +1595,7 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
         self.tree.auto_size_column(0)
 
     def remove_prefix_changed(self, state):
-        if state == QtCore.Qt.Checked:
+        if state == QtCore.Qt.CheckState.Checked:
             self.prefix.setEnabled(True)
 
             self.tree.columnHeaderNames.model().prefix = self.prefix.currentText()
@@ -1743,7 +1612,7 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
         self.tree.auto_size_header()
 
     def prefix_changed(self, index):
-        self.remove_prefix_changed(QtCore.Qt.Checked)
+        self.remove_prefix_changed(QtCore.Qt.CheckState.Checked)
 
     def open_menu(self, position):
         menu = QtWidgets.QMenu()
@@ -1765,18 +1634,14 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
 
             if file_name:
                 self.progress = 0, 0
-                progress = QtWidgets.QProgressDialog(
-                    f'Data export to CSV file "{file_name}"', "", 0, 0, self.parent()
-                )
+                progress = QtWidgets.QProgressDialog(f'Data export to CSV file "{file_name}"', "", 0, 0, self.parent())
 
-                progress.setWindowModality(QtCore.Qt.ApplicationModal)
+                progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
                 progress.setCancelButton(None)
                 progress.setAutoClose(True)
                 progress.setWindowTitle("Export tabular window to CSV")
                 icon = QtGui.QIcon()
-                icon.addPixmap(
-                    QtGui.QPixmap(":/csv.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-                )
+                icon.addPixmap(QtGui.QPixmap(":/csv.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
                 progress.setWindowIcon(icon)
                 progress.show()
 
@@ -1803,22 +1668,22 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
         modifiers = event.modifiers()
 
         if (
-            key in (QtCore.Qt.Key_H, QtCore.Qt.Key_B, QtCore.Qt.Key_P)
-            and modifiers == QtCore.Qt.ControlModifier
+            key in (QtCore.Qt.Key.Key_H, QtCore.Qt.Key.Key_B, QtCore.Qt.Key.Key_P)
+            and modifiers == QtCore.Qt.KeyboardModifier.ControlModifier
         ):
-            if key == QtCore.Qt.Key_H:
+            event.accept()
+            if key == QtCore.Qt.Key.Key_H:
                 self.format_selection.setCurrentText("hex")
-            elif key == QtCore.Qt.Key_B:
+            elif key == QtCore.Qt.Key.Key_B:
                 self.format_selection.setCurrentText("bin")
             else:
                 self.format_selection.setCurrentText("phys")
 
+        elif key == QtCore.Qt.Key.Key_S and modifiers == QtCore.Qt.KeyboardModifier.ControlModifier:
             event.accept()
-
-        elif key == QtCore.Qt.Key_S and modifiers == QtCore.Qt.ControlModifier:
             file_name, _ = QtWidgets.QFileDialog.getSaveFileName(
                 self,
-                "Select output measurement file",
+                "Save as measurement file",
                 "",
                 "MDF version 4 files (*.mf4)",
             )
@@ -1828,15 +1693,25 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
                     mdf.append(self.tree.pgdf.df_unfiltered)
                     mdf.save(file_name, overwrite=True)
 
-        elif (
-            key == QtCore.Qt.Key_BracketLeft and modifiers == QtCore.Qt.ControlModifier
-        ):
+        elif key == QtCore.Qt.Key.Key_BracketLeft and modifiers == QtCore.Qt.KeyboardModifier.ControlModifier:
+            event.accept()
             self.decrease_font()
 
-        elif (
-            key == QtCore.Qt.Key_BracketRight and modifiers == QtCore.Qt.ControlModifier
-        ):
+        elif key == QtCore.Qt.Key.Key_BracketRight and modifiers == QtCore.Qt.KeyboardModifier.ControlModifier:
+            event.accept()
             self.increase_font()
+
+        elif key == QtCore.Qt.Key.Key_G and modifiers == QtCore.Qt.KeyboardModifier.ShiftModifier:
+            event.accept()
+            value, ok = QtWidgets.QInputDialog.getDouble(
+                self,
+                "Go to time stamp",
+                "Time stamp",
+                decimals=9,
+            )
+
+            if ok:
+                self.set_timestamp(value)
 
         else:
             self.tree.dataView.keyPressEvent(event)
@@ -1857,18 +1732,12 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
             self.apply_filters()
 
     def set_timestamp(self, stamp):
-        self._filtered_ts_series = self._original_ts_series.reindex(
-            self.tree.pgdf.df.index
-        )
+        self._filtered_ts_series = self._original_ts_series.reindex(self.tree.pgdf.df.index)
 
         if not len(self._filtered_ts_series):
             return
 
-        if not (
-            self._filtered_ts_series.iloc[0]
-            <= stamp
-            <= self._filtered_ts_series.iloc[-1]
-        ):
+        if not (self._filtered_ts_series.iloc[0] <= stamp <= self._filtered_ts_series.iloc[-1]):
             return
 
         idx = self._filtered_ts_series.searchsorted(stamp, side="right") - 1
@@ -1881,9 +1750,7 @@ class TabularBase(Ui_TabularDisplay, QtWidgets.QWidget):
         if index >= 0:
             original_name = self.tree.pgdf.df_unfiltered.columns[index]
 
-            dlg = RangeEditor(
-                name, "", self.ranges[original_name], parent=self, brush=True
-            )
+            dlg = RangeEditor(name, "", self.ranges[original_name], parent=self, brush=True)
             dlg.exec_()
             if dlg.pressed_button == "apply":
                 ranges = dlg.result
@@ -1944,9 +1811,7 @@ class DataFrameViewer(QtWidgets.QWidget):
                 "Courier",
             ):
                 if family in families:
-                    MONOSPACE_FONT = (
-                        f"{family},9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,Regular"
-                    )
+                    MONOSPACE_FONT = f"{family},9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,Regular"
                     break
 
         pgdf.dataframe_viewer = self
@@ -1961,11 +1826,11 @@ class DataFrameViewer(QtWidgets.QWidget):
         self.dataView = DataTableView(parent=self)
 
         # Create headers
-        self.columnHeader = HeaderView(parent=self, orientation=Qt.Horizontal)
-        self.indexHeader = HeaderView(parent=self, orientation=Qt.Vertical)
+        self.columnHeader = HeaderView(parent=self, orientation=Qt.Orientation.Horizontal)
+        self.indexHeader = HeaderView(parent=self, orientation=Qt.Orientation.Vertical)
 
-        self.columnHeaderNames = HeaderNamesView(parent=self, orientation=Qt.Horizontal)
-        self.indexHeaderNames = HeaderNamesView(parent=self, orientation=Qt.Vertical)
+        self.columnHeaderNames = HeaderNamesView(parent=self, orientation=Qt.Orientation.Horizontal)
+        self.indexHeaderNames = HeaderNamesView(parent=self, orientation=Qt.Orientation.Vertical)
 
         # Set up layout
         self.gridLayout = QtWidgets.QGridLayout()
@@ -1975,25 +1840,15 @@ class DataFrameViewer(QtWidgets.QWidget):
 
         # Linking scrollbars
         # Scrolling in data table also scrolls the headers
-        self.dataView.horizontalScrollBar().valueChanged.connect(
-            self.columnHeader.horizontalScrollBar().setValue
-        )
-        self.dataView.horizontalScrollBar().valueChanged.connect(
-            self.columnHeaderNames.horizontalScrollBar().setValue
-        )
-        self.dataView.verticalScrollBar().valueChanged.connect(
-            self.indexHeader.verticalScrollBar().setValue
-        )
+        self.dataView.horizontalScrollBar().valueChanged.connect(self.columnHeader.horizontalScrollBar().setValue)
+        self.dataView.horizontalScrollBar().valueChanged.connect(self.columnHeaderNames.horizontalScrollBar().setValue)
+        self.dataView.verticalScrollBar().valueChanged.connect(self.indexHeader.verticalScrollBar().setValue)
         # Scrolling in headers also scrolls the data table
-        self.columnHeader.horizontalScrollBar().valueChanged.connect(
-            self.dataView.horizontalScrollBar().setValue
-        )
-        self.indexHeader.verticalScrollBar().valueChanged.connect(
-            self.dataView.verticalScrollBar().setValue
-        )
+        self.columnHeader.horizontalScrollBar().valueChanged.connect(self.dataView.horizontalScrollBar().setValue)
+        self.indexHeader.verticalScrollBar().valueChanged.connect(self.dataView.verticalScrollBar().setValue)
         # Turn off default scrollbars
-        self.dataView.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.dataView.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.dataView.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.dataView.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         # Disable scrolling on the headers. Even though the scrollbars are hidden, scrolling by dragging desyncs them
         self.indexHeader.horizontalScrollBar().valueChanged.connect(lambda: None)
 
@@ -2001,34 +1856,28 @@ class DataFrameViewer(QtWidgets.QWidget):
             def __init__(self):
                 super().__init__()
                 # https://stackoverflow.com/questions/32313469/stylesheet-in-pyside-not-working
-                self.setAttribute(QtCore.Qt.WA_StyledBackground)
+                self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground)
 
         self.corner_widget = CornerWidget()
         self.corner_widget.setSizePolicy(
-            QtWidgets.QSizePolicy(
-                QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
-            )
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
         )
         # Add items to grid layout
         # self.gridLayout.addWidget(self.corner_widget, 0, 0)
-        self.gridLayout.addWidget(self.columnHeader, 0, 1, 2, 2, Qt.AlignTop)
+        self.gridLayout.addWidget(self.columnHeader, 0, 1, 2, 2, Qt.AlignmentFlag.AlignTop)
         self.gridLayout.addWidget(self.columnHeaderNames, 0, 3, 2, 1)
-        self.gridLayout.addWidget(self.indexHeader, 2, 0, 2, 2, Qt.AlignLeft)
-        self.gridLayout.addWidget(self.indexHeaderNames, 1, 0, 1, 1, Qt.AlignBottom)
+        self.gridLayout.addWidget(self.indexHeader, 2, 0, 2, 2, Qt.AlignmentFlag.AlignLeft)
+        self.gridLayout.addWidget(self.indexHeaderNames, 1, 0, 1, 1, Qt.AlignmentFlag.AlignBottom)
         self.gridLayout.addWidget(self.dataView, 3, 2, 1, 1)
         self.gridLayout.addWidget(self.dataView.horizontalScrollBar(), 4, 2, 1, 1)
         self.gridLayout.addWidget(self.dataView.verticalScrollBar(), 3, 3, 1, 1)
 
         # Fix scrollbars forcing a minimum height of the dataView which breaks layout for small number of rows
         self.dataView.verticalScrollBar().setSizePolicy(
-            QtWidgets.QSizePolicy(
-                QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Ignored
-            )
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Ignored)
         )
         self.dataView.horizontalScrollBar().setSizePolicy(
-            QtWidgets.QSizePolicy(
-                QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed
-            )
+            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
         )
 
         # These expand when the window is enlarged instead of having the grid squares spread out
@@ -2040,16 +1889,16 @@ class DataFrameViewer(QtWidgets.QWidget):
 
         #
         # self.gridLayout.addItem(QtWidgets.QSpacerItem(0, 0,
-        #                                               QtWidgets.QSizePolicy.Expanding,
-        #                                               QtWidgets.QSizePolicy.Expanding), 0, 0, 1, 1, )
+        #                                               QtWidgets.QSizePolicy.Policy.Expanding,
+        #                                               QtWidgets.QSizePolicy.Policy.Expanding), 0, 0, 1, 1, )
 
         self.default_row_height = 24
         self.set_styles()
         self.indexHeader.setSizePolicy(
-            QtWidgets.QSizePolicy.MinimumExpanding, QtWidgets.QSizePolicy.Maximum
+            QtWidgets.QSizePolicy.Policy.MinimumExpanding, QtWidgets.QSizePolicy.Policy.Maximum
         )
         self.columnHeader.setSizePolicy(
-            QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.MinimumExpanding
+            QtWidgets.QSizePolicy.Policy.Maximum, QtWidgets.QSizePolicy.Policy.MinimumExpanding
         )
 
         # Set column widths
@@ -2059,9 +1908,7 @@ class DataFrameViewer(QtWidgets.QWidget):
         self.columnHeader.horizontalHeader().setStretchLastSection(True)
         self.columnHeaderNames.horizontalHeader().setStretchLastSection(True)
 
-        self.columnHeader.horizontalHeader().sectionResized.connect(
-            self.update_horizontal_scroll
-        )
+        self.columnHeader.horizontalHeader().sectionResized.connect(self.update_horizontal_scroll)
 
         self.columnHeader.horizontalHeader().setMinimumSectionSize(1)
         self.dataView.horizontalHeader().setMinimumSectionSize(1)
@@ -2081,38 +1928,22 @@ class DataFrameViewer(QtWidgets.QWidget):
             item.setContentsMargins(0, 0, 0, 0)
             # item.setItemDelegate(NoFocusDelegate())
 
-        self.indexHeaderNames.verticalHeader().setDefaultSectionSize(
-            self.default_row_height
-        )
-        self.indexHeaderNames.verticalHeader().setMinimumSectionSize(
-            self.default_row_height
-        )
-        self.indexHeaderNames.verticalHeader().setMaximumSectionSize(
-            self.default_row_height
-        )
-        self.indexHeaderNames.verticalHeader().sectionResizeMode(
-            QtWidgets.QHeaderView.Fixed
-        )
+        self.indexHeaderNames.verticalHeader().setDefaultSectionSize(self.default_row_height)
+        self.indexHeaderNames.verticalHeader().setMinimumSectionSize(self.default_row_height)
+        self.indexHeaderNames.verticalHeader().setMaximumSectionSize(self.default_row_height)
+        self.indexHeaderNames.verticalHeader().sectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Fixed)
         self.indexHeader.verticalHeader().setDefaultSectionSize(self.default_row_height)
         self.indexHeader.verticalHeader().setMinimumSectionSize(self.default_row_height)
         self.indexHeader.verticalHeader().setMaximumSectionSize(self.default_row_height)
-        self.indexHeader.verticalHeader().sectionResizeMode(QtWidgets.QHeaderView.Fixed)
+        self.indexHeader.verticalHeader().sectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Fixed)
         self.dataView.verticalHeader().setDefaultSectionSize(self.default_row_height)
         self.dataView.verticalHeader().setMinimumSectionSize(self.default_row_height)
         self.dataView.verticalHeader().setMaximumSectionSize(self.default_row_height)
-        self.dataView.verticalHeader().sectionResizeMode(QtWidgets.QHeaderView.Fixed)
-        self.columnHeader.verticalHeader().setDefaultSectionSize(
-            self.default_row_height
-        )
-        self.columnHeader.verticalHeader().setMinimumSectionSize(
-            self.default_row_height
-        )
-        self.columnHeader.verticalHeader().setMaximumSectionSize(
-            self.default_row_height
-        )
-        self.columnHeader.verticalHeader().sectionResizeMode(
-            QtWidgets.QHeaderView.Fixed
-        )
+        self.dataView.verticalHeader().sectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Fixed)
+        self.columnHeader.verticalHeader().setDefaultSectionSize(self.default_row_height)
+        self.columnHeader.verticalHeader().setMinimumSectionSize(self.default_row_height)
+        self.columnHeader.verticalHeader().setMaximumSectionSize(self.default_row_height)
+        self.columnHeader.verticalHeader().sectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Fixed)
 
     def __reduce__(self):
         # This is so dataclasses.asdict doesn't complain about this being unpicklable
@@ -2199,16 +2030,18 @@ class DataFrameViewer(QtWidgets.QWidget):
         QtWidgets.QWidget.keyPressEvent(self, event)
         mods = event.modifiers()
 
-        # Ctrl+C
-        if event.key() == Qt.Key_C and (mods & Qt.ControlModifier):
+        if event.key() == Qt.Key.Key_C and (mods & Qt.KeyboardModifier.ControlModifier):
+            event.accept()
             self.copy(header=True)
-        # Ctrl+Shift+C
+
         elif (
-            event.key() == Qt.Key_C
-            and (mods & Qt.ShiftModifier)
-            and (mods & Qt.ControlModifier)
+            event.key() == Qt.Key.Key_C
+            and (mods & Qt.KeyboardModifier.ShiftModifier)
+            and (mods & Qt.KeyboardModifier.ControlModifier)
         ):
+            event.accept()
             self.copy(header=True)
+
         else:
             self.dataView.keyPressEvent(event)
 
@@ -2301,9 +2134,7 @@ class DataFrameViewer(QtWidgets.QWidget):
             column_ix = column_ix_or_name
 
         point = QtCore.QPoint(
-            self.columnHeader.columnViewportPosition(column_ix)
-            + self.columnHeader.columnWidth(column_ix)
-            - 15,
+            self.columnHeader.columnViewportPosition(column_ix) + self.columnHeader.columnWidth(column_ix) - 15,
             self.columnHeader.geometry().bottom() - 6,
         )
 

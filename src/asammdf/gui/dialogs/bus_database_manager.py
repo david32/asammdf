@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 from PySide6 import QtCore, QtWidgets
 
 from ..widgets.bus_database_manager import BusDatabaseManager
@@ -15,7 +14,7 @@ class BusDatabaseManagerDialog(QtWidgets.QDialog):
         self.setObjectName("BusDatabaseManagerDialog")
         self.resize(404, 294)
         self.setSizeGripEnabled(True)
-        self.setWindowFlags(QtCore.Qt.Window)
+        self.setWindowFlags(QtCore.Qt.WindowType.Window)
         self.verticalLayout = QtWidgets.QVBoxLayout(self)
 
         self._settings = QtCore.QSettings()
@@ -26,13 +25,13 @@ class BusDatabaseManagerDialog(QtWidgets.QDialog):
         buses = can_databases[::2]
         dbs = can_databases[1::2]
 
-        databases["CAN"] = [(bus, database) for bus, database in zip(buses, dbs)]
+        databases["CAN"] = list(zip(buses, dbs))
 
         lin_databases = self._settings.value("lin_databases", [])
         buses = lin_databases[::2]
         dbs = lin_databases[1::2]
 
-        databases["LIN"] = [(bus, database) for bus, database in zip(buses, dbs)]
+        databases["LIN"] = list(zip(buses, dbs))
 
         self.widget = BusDatabaseManager(databases)
 
@@ -41,7 +40,7 @@ class BusDatabaseManagerDialog(QtWidgets.QDialog):
         self.horLayout = QtWidgets.QHBoxLayout(self)
 
         spacer = QtWidgets.QSpacerItem(
-            40, 20, QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum
+            40, 20, QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Minimum
         )
         self.apply_btn = QtWidgets.QPushButton("Apply")
         self.cancel_btn = QtWidgets.QPushButton("Cancel")
@@ -70,12 +69,9 @@ class BusDatabaseManagerDialog(QtWidgets.QDialog):
     def store(self):
         databases = self.widget.to_config()
 
-        print(databases)
-
         dbs = []
         for bus, database in databases["CAN"]:
-            dbs.append(bus)
-            dbs.append(database)
+            dbs.extend((bus, database))
 
         self._settings.setValue("can_databases", dbs)
 

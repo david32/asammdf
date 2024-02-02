@@ -18,7 +18,7 @@ def format(color, style=""):
     _format = QtGui.QTextCharFormat()
     _format.setForeground(_color)
     if "bold" in style:
-        _format.setFontWeight(QtGui.QFont.Bold)
+        _format.setFontWeight(QtGui.QFont.Weight.Bold)
     if "italic" in style:
         _format.setFontItalic(True)
 
@@ -53,45 +53,45 @@ class PythonHighlighter(QtGui.QSyntaxHighlighter):
 
     # Python operators
     operators = [
-        "=",
+        r"=",
         # Comparison
-        "==",
+        r"==",
         "!=",
         "<",
         "<=",
         ">",
         ">=",
         # Arithmetic
-        "\+",
+        r"\+",
         "-",
-        "\*",
+        r"\*",
         "/",
         "//",
-        "\%",
-        "\*\*",
+        r"\%",
+        r"\*\*",
         # In-place
-        "\+=",
+        r"\+=",
         "-=",
-        "\*=",
+        r"\*=",
         "/=",
-        "\%=",
+        r"\%=",
         # Bitwise
-        "\^",
-        "\|",
-        "\&",
-        "\~",
+        r"\^",
+        r"\|",
+        r"\&",
+        r"\~",
         ">>",
         "<<",
     ]
 
     # Python braces
     braces = [
-        "\{",
-        "\}",
-        "\(",
-        "\)",
-        "\[",
-        "\]",
+        r"\{",
+        r"\}",
+        r"\(",
+        r"\)",
+        r"\[",
+        r"\]",
     ]
 
     def __init__(self, parent: QtGui.QTextDocument) -> None:
@@ -104,14 +104,10 @@ class PythonHighlighter(QtGui.QSyntaxHighlighter):
         rules = []
 
         # Keyword, operator, and brace rules
-        rules += [
-            (rf"\b{w}\b", 0, STYLES["keyword"]) for w in PythonHighlighter.keywords
-        ]
+        rules += [(rf"\b{w}\b", 0, STYLES["keyword"]) for w in PythonHighlighter.keywords]
         rules += [(o, 0, STYLES["operator"]) for o in PythonHighlighter.operators]
         rules += [(b, 0, STYLES["brace"]) for b in PythonHighlighter.braces]
-        rules += [
-            (rf"\b{b}\b", 0, STYLES["builtins"]) for b in PythonHighlighter.builtins
-        ]
+        rules += [(rf"\b{b}\b", 0, STYLES["builtins"]) for b in PythonHighlighter.builtins]
 
         # All other rules
         rules += [
@@ -138,9 +134,7 @@ class PythonHighlighter(QtGui.QSyntaxHighlighter):
         ]
 
         # Build a QRegularExpression for each pattern
-        self.rules = [
-            (QtCore.QRegularExpression(pat), index, fmt) for (pat, index, fmt) in rules
-        ]
+        self.rules = [(QtCore.QRegularExpression(pat), index, fmt) for (pat, index, fmt) in rules]
 
     def highlightBlock(self, text):
         """Apply syntax highlighting to the given block of text."""

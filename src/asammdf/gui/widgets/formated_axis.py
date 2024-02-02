@@ -1,6 +1,5 @@
-# -*- coding: utf-8 -*-
-
 from datetime import datetime, timedelta, timezone
+from traceback import format_exc
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -24,8 +23,12 @@ class FormatedAxis(pg.AxisItem):
         self.plus = self.minus = None
         self.uuid = kwargs.pop("uuid", None)
         self.background = kwargs.pop("background", fn.mkColor("#000000"))
+        self.linked_signal = kwargs.pop("linked_signal", None)
 
         super().__init__(*args, **kwargs)
+        self.setStyle(tickAlpha=0.75)
+
+        self._settings = QtCore.QSettings()
 
         self.format = "phys"
         self.mode = "phys"
@@ -70,7 +73,7 @@ class FormatedAxis(pg.AxisItem):
         if self.text_conversion and self.mode == "phys":
             strns = []
             for val in values:
-                nv = self.text_conversion.convert(np.array([val]))[0]
+                nv = self.text_conversion.convert(np.array([val]), as_bytes=True)[0]
 
                 val = float(val)
 
@@ -95,7 +98,7 @@ class FormatedAxis(pg.AxisItem):
                     strns.append(val)
         else:
             if self.format == "phys":
-                strns = super(FormatedAxis, self).tickStrings(values, scale, spacing)
+                strns = super().tickStrings(values, scale, spacing)
 
             elif self.format == "hex":
                 for val in values:
@@ -170,14 +173,14 @@ class FormatedAxis(pg.AxisItem):
             else:
                 units = "(x%g)" % (1.0 / self.autoSIPrefixScale)
         else:
-            units = "(%s%s)" % (self.labelUnitPrefix, self.labelUnits)
+            units = f"({self.labelUnitPrefix}{self.labelUnits})"
 
-        s = "%s %s" % (self.labelText, units)
+        s = f"{self.labelText} {units}"
         self._label_with_unit = s
 
-        style = ";".join(["%s: %s" % (k, self.labelStyle[k]) for k in self.labelStyle])
+        style = ";".join([f"{k}: {self.labelStyle[k]}" for k in self.labelStyle])
 
-        lsbl = "<span style='%s'>%s</span>" % (style, s)
+        lsbl = f"<span style='{style}'>{s}</span>"
         return lsbl
 
     def mouseDragEvent(self, event):
@@ -198,14 +201,10 @@ class FormatedAxis(pg.AxisItem):
                 QtCore.Qt.MouseButton.MiddleButton,
             ]:
                 if self.orientation in ("left", "right"):
-                    scale = (
-                        self.range[1] - self.range[0]
-                    ) / self.sceneBoundingRect().height()
+                    scale = (self.range[1] - self.range[0]) / self.sceneBoundingRect().height()
                     delta = scale * dif.y()
                 else:
-                    scale = (
-                        self.range[1] - self.range[0]
-                    ) / self.sceneBoundingRect().width()
+                    scale = (self.range[1] - self.range[0]) / self.sceneBoundingRect().width()
                     delta = scale * dif.x()
 
                 self.setRange(self.range[0] - delta, self.range[1] - delta)
@@ -379,6 +378,8 @@ class FormatedAxis(pg.AxisItem):
         self.label.setFont(font)
 
     def setRange(self, mn, mx):
+        if mn > mx:
+            mn, mx = mx, mn
         super().setRange(mn, mx)
         self.rangeChanged.emit(self.uuid, (mn, mx))
 
@@ -391,52 +392,92 @@ class FormatedAxis(pg.AxisItem):
         if lv is None:
             # this is one of the individual axis
 
+            zoom_y_center_on_cursor = self._settings.value("zoom_y_center_on_cursor", False, type=bool)
+
             pos = event.pos()
             rect = self.boundingRect()
 
-            y_pos_val = ((rect.height() + rect.y()) - pos.y()) / rect.height() * (
-                self.range[-1] - self.range[0]
-            ) + self.range[0]
+            if zoom_y_center_on_cursor:
+                plot, uuid = self.linked_signal
 
-            ratio = abs((pos.y() - (rect.height() + rect.y())) / rect.height())
+                y_pos_val, sig_y_bottom, sig_y_top = plot.value_at_cursor(uuid)
 
-            delta = self.range[-1] - self.range[0]
+                delta_proc = (y_pos_val - (sig_y_top + sig_y_bottom) / 2) / (sig_y_top - sig_y_bottom)
+                shift = delta_proc * (sig_y_top - sig_y_bottom)
+                sig_y_top, sig_y_bottom = sig_y_top + shift, sig_y_bottom + shift
 
-            if event.delta() > 0:
-                delta = 0.66 * delta
+                delta = sig_y_top - sig_y_bottom
+
+                if event.delta() > 0:
+                    end = sig_y_top - 0.165 * delta
+                    start = sig_y_bottom + 0.165 * delta
+                else:
+                    end = sig_y_top + 0.165 * delta
+                    start = sig_y_bottom - 0.165 * delta
+
+                self.setRange(start, end)
+
             else:
-                delta = 1.33 * delta
+                y_pos_val = ((rect.height() + rect.y()) - pos.y()) / rect.height() * (
+                    self.range[-1] - self.range[0]
+                ) + self.range[0]
 
-            start = y_pos_val - ratio * delta
-            end = y_pos_val + (1 - ratio) * delta
+                ratio = abs((pos.y() - (rect.height() + rect.y())) / rect.height())
 
-            self.setRange(start, end)
+                delta = self.range[-1] - self.range[0]
+
+                if event.delta() > 0:
+                    delta = 0.66 * delta
+                else:
+                    delta = 1.33 * delta
+
+                start = y_pos_val - ratio * delta
+                end = y_pos_val + (1 - ratio) * delta
+
+                self.setRange(start, end)
 
             event.accept()
         else:
             # this is the main Y axis or the X axis
+            if self.orientation in ("top", "bottom"):
+                super().wheelEvent(event)
+            else:
+                # main Y axis
 
-            if lv.state["mouseMode"] == lv.CursorMode:
-                if self.orientation in ("top", "bottom"):
-                    super().wheelEvent(event)
+                if not lv.state["mouseEnabled"][1]:
+                    event.ignore()
                 else:
-                    # main Y axis
-                    if lv.state["mouseEnabled"][1]:
-                        # the plot is not Y locked
-                        pos = event.pos()
-                        rect = self.boundingRect()
+                    # the plot is not Y locked
+                    pos = event.pos()
+                    rect = self.boundingRect()
 
-                        y_pos_val = (
-                            (rect.height() + rect.y()) - pos.y()
-                        ) / rect.height() * (
+                    if self._settings.value("zoom_y_center_on_cursor", False, type=bool):
+                        plot, uuid = self.linked_signal
+
+                        y_pos_val, sig_y_bottom, sig_y_top = plot.value_at_cursor()
+
+                        if isinstance(y_pos_val, (int, float)):
+                            delta_proc = (y_pos_val - (sig_y_top + sig_y_bottom) / 2) / (sig_y_top - sig_y_bottom)
+                            shift = delta_proc * (sig_y_top - sig_y_bottom)
+                            sig_y_top, sig_y_bottom = sig_y_top + shift, sig_y_bottom + shift
+
+                        delta = sig_y_top - sig_y_bottom
+
+                        if event.delta() > 0:
+                            end = sig_y_top - 0.165 * delta
+                            start = sig_y_bottom + 0.165 * delta
+                        else:
+                            end = sig_y_top + 0.165 * delta
+                            start = sig_y_bottom - 0.165 * delta
+
+                        self.setRange(start, end)
+
+                    else:
+                        y_pos_val = ((rect.height() + rect.y()) - pos.y()) / rect.height() * (
                             self.range[-1] - self.range[0]
-                        ) + self.range[
-                            0
-                        ]
+                        ) + self.range[0]
 
-                        ratio = abs(
-                            (pos.y() - (rect.height() + rect.y())) / rect.height()
-                        )
+                        ratio = abs((pos.y() - (rect.height() + rect.y())) / rect.height())
 
                         delta = self.range[-1] - self.range[0]
 
@@ -450,72 +491,98 @@ class FormatedAxis(pg.AxisItem):
 
                         self.setRange(start, end)
 
-                        event.accept()
-                    else:
-                        event.ignore()
+                    event.accept()
 
-            else:
-                if self.orientation in ("top", "bottom") or lv.state["mouseEnabled"][1]:
-                    super().wheelEvent(event)
-                else:
-                    event.ignore()
+    def drawPicture(self, p, axisSpec, tickSpecs, textSpecs, ratio=1.0):
+        p.setRenderHint(p.RenderHint.Antialiasing, False)
+        p.setRenderHint(p.RenderHint.TextAntialiasing, True)
+
+        ## draw long line along axis
+        pen, p1, p2 = axisSpec
+        p.setPen(pen)
+        p.drawLine(p1, p2)
+        # p.translate(0.5,0)  ## resolves some damn pixel ambiguity
+
+        ## draw ticks
+        for pen, p1, p2 in tickSpecs:
+            p.setPen(pen)
+            p.drawLine(p1, p2)
+
+        # Draw all text
+        if self.style["tickFont"] is not None:
+            p.setFont(self.style["tickFont"])
+        p.setPen(self.textPen())
+        bounding = self.boundingRect().toAlignedRect()
+        bounding.setSize(bounding.size() * ratio)
+        bounding.moveTo(bounding.topLeft() * ratio)
+        p.setClipRect(bounding)
+        for rect, flags, text in textSpecs:
+            p.drawText(rect, int(flags), text)
 
     def paint(self, p, opt, widget):
         rect = self.boundingRect()
 
         width = rect.width()
+        ratio = widget.devicePixelRatio() if widget else 1.0
         if self.picture is None:
             try:
-                picture = QtGui.QPixmap(width, rect.height())
+                picture = QtGui.QPixmap(int(width * ratio), int(rect.height() * ratio))
                 picture.fill(self.background)
 
                 painter = QtGui.QPainter()
                 painter.begin(picture)
 
                 if self.isVisible():
-                    painter.setCompositionMode(
-                        QtGui.QPainter.CompositionMode_SourceOver
-                    )
+                    painter.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceOver)
                     if self.style["tickFont"]:
                         painter.setFont(self.style["tickFont"])
-                    specs = self.generateDrawSpecs(painter)
+                    specs = self.generateDrawSpecs(painter, ratio)
 
                     if specs is not None:
-                        self.drawPicture(painter, *specs)
+                        self.drawPicture(painter, *specs, ratio)
 
                     if self.minus is not None:
                         painter.drawPixmap(
-                            QtCore.QPoint(int(rect.x()) + 5, 6),
-                            self.minus.pixmap.scaled(BUTTON_SIZE, BUTTON_SIZE),
+                            QtCore.QPoint(int(rect.x() * ratio) + 5 * ratio, 6 * ratio),
+                            self.minus.pixmap.scaled(BUTTON_SIZE * ratio, BUTTON_SIZE * ratio),
                         )
                         painter.drawPixmap(
-                            QtCore.QPoint(int(rect.x()) + 5, 27),
-                            self.plus.pixmap.scaled(BUTTON_SIZE, BUTTON_SIZE),
+                            QtCore.QPoint((int(rect.x()) + 5) * ratio, 27 * ratio),
+                            self.plus.pixmap.scaled(BUTTON_SIZE * ratio, BUTTON_SIZE * ratio),
                         )
 
                     if self.orientation in ("left", "right"):
                         painter.setPen(self._pen)
 
                         label_rect = QtCore.QRectF(
-                            1, 1, rect.height() - (28 + BUTTON_SIZE), rect.width()
+                            1 * ratio,
+                            1 * ratio,
+                            rect.height() * ratio - (28 + BUTTON_SIZE) * ratio,
+                            rect.width() * ratio,
                         )
-                        painter.translate(rect.bottomLeft())
+                        painter.translate(rect.bottomLeft() * ratio)
                         painter.rotate(-90)
 
                         painter.setRenderHint(painter.RenderHint.TextAntialiasing, True)
                         painter.drawText(
                             label_rect,
-                            QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop,
+                            QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignTop,
                             self._label_with_unit,
                         )
                         painter.rotate(90)
                         painter.resetTransform()
 
+            except:
+                print(format_exc())
+
             finally:
                 painter.end()
+
+            picture.setDevicePixelRatio(widget.devicePixelRatio() if widget else 1.0)
+
             self.picture = picture
 
-    def generateDrawSpecs(self, p):
+    def generateDrawSpecs(self, p, ratio):
         """
         Calls tickValues() and tickStrings() to determine where and how ticks should
         be drawn, then generates from this a set of drawing commands to be
@@ -550,9 +617,7 @@ class FormatedAxis(pg.AxisItem):
             tickDir = 1
             axis = 1
         else:
-            raise ValueError(
-                "self.orientation must be in ('left', 'right', 'top', 'bottom')"
-            )
+            raise ValueError("self.orientation must be in ('left', 'right', 'top', 'bottom')")
 
         ## determine size of this item in pixels
         points = list(map(self.mapToDevice, span))
@@ -613,11 +678,7 @@ class FormatedAxis(pg.AxisItem):
                 lineAlpha = 255 / (i + 1)
                 if self.grid is not False:
                     lineAlpha *= (
-                        self.grid
-                        / 255.0
-                        * fn.clip_scalar(
-                            (0.05 * lengthInPixels / (len(ticks) + 1)), 0.0, 1.0
-                        )
+                        self.grid / 255.0 * fn.clip_scalar((0.05 * lengthInPixels / (len(ticks) + 1)), 0.0, 1.0)
                     )
             elif isinstance(lineAlpha, float):
                 lineAlpha *= 255
@@ -632,9 +693,7 @@ class FormatedAxis(pg.AxisItem):
             for v in ticks:
                 ## determine actual position to draw this tick
                 x = (v * xScale) - offset
-                if (
-                    x < xMin or x > xMax
-                ):  ## last check to make sure no out-of-bounds ticks are drawn
+                if x < xMin or x > xMax:  ## last check to make sure no out-of-bounds ticks are drawn
                     tickPositions[i].append(None)
                     continue
                 tickPositions[i].append(x)
@@ -668,9 +727,7 @@ class FormatedAxis(pg.AxisItem):
                 span[1].setX(stop)
         axisSpec = (self.pen(), span[0], span[1])
 
-        textOffset = self.style["tickTextOffset"][
-            axis
-        ]  ## spacing between axis and text
+        textOffset = self.style["tickTextOffset"][axis]  ## spacing between axis and text
         # if self.style['autoExpandTextSpace'] is True:
         # textWidth = self.textWidth
         # textHeight = self.textHeight
@@ -691,9 +748,7 @@ class FormatedAxis(pg.AxisItem):
             ## Get the list of strings to display for this level
             if tickStrings is None:
                 spacing, values = tickLevels[i]
-                strings = self.tickStrings(
-                    values, self.autoSIPrefixScale * self.scale, spacing
-                )
+                strings = self.tickStrings(values, self.autoSIPrefixScale * self.scale, spacing)
             else:
                 strings = tickStrings[i]
 
@@ -766,37 +821,17 @@ class FormatedAxis(pg.AxisItem):
                 offset = max(0, self.style["tickLength"]) + textOffset
 
                 if self.orientation == "left":
-                    alignFlags = (
-                        QtCore.Qt.AlignmentFlag.AlignRight
-                        | QtCore.Qt.AlignmentFlag.AlignVCenter
-                    )
-                    rect = QtCore.QRectF(
-                        tickStop - offset - width, x - (height / 2), width, height
-                    )
+                    alignFlags = QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
+                    rect = QtCore.QRectF(tickStop - offset - width, x - (height / 2), width, height)
                 elif self.orientation == "right":
-                    alignFlags = (
-                        QtCore.Qt.AlignmentFlag.AlignLeft
-                        | QtCore.Qt.AlignmentFlag.AlignVCenter
-                    )
-                    rect = QtCore.QRectF(
-                        tickStop + offset, x - (height / 2), width, height
-                    )
+                    alignFlags = QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+                    rect = QtCore.QRectF(tickStop + offset, x - (height / 2), width, height)
                 elif self.orientation == "top":
-                    alignFlags = (
-                        QtCore.Qt.AlignmentFlag.AlignHCenter
-                        | QtCore.Qt.AlignmentFlag.AlignBottom
-                    )
-                    rect = QtCore.QRectF(
-                        x - width / 2.0, tickStop - offset - height, width, height
-                    )
+                    alignFlags = QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignBottom
+                    rect = QtCore.QRectF(x - width / 2.0, tickStop - offset - height, width, height)
                 elif self.orientation == "bottom":
-                    alignFlags = (
-                        QtCore.Qt.AlignmentFlag.AlignHCenter
-                        | QtCore.Qt.AlignmentFlag.AlignTop
-                    )
-                    rect = QtCore.QRectF(
-                        x - width / 2.0, tickStop + offset, width, height
-                    )
+                    alignFlags = QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignTop
+                    rect = QtCore.QRectF(x - width / 2.0, tickStop + offset, width, height)
 
                 textFlags = alignFlags | QtCore.Qt.TextFlag.TextDontClip
                 # p.setPen(self.pen())
@@ -807,5 +842,24 @@ class FormatedAxis(pg.AxisItem):
         self._updateMaxTextSize(lastTextSize2)
 
         self.tickSpecs = tickSpecs
+
+        axisSpec = (
+            axisSpec[0],
+            axisSpec[1] * ratio,
+            axisSpec[2] * ratio,
+        )
+
+        bounds.setSize(bounds.size() * ratio)
+
+        for spec in textSpecs:
+            spec[0].setSize(spec[0].size() * ratio)
+            spec[0].moveTo(spec[0].topLeft() * ratio)
+
+        for i, spec in enumerate(tickSpecs):
+            tickSpecs[i] = (
+                spec[0],
+                spec[1] * ratio,
+                spec[2] * ratio,
+            )
 
         return (axisSpec, tickSpecs, textSpecs)

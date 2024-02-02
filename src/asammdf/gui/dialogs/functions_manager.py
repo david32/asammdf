@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 from copy import deepcopy
 import os
-from traceback import format_exc
 
 from PySide6 import QtCore, QtWidgets
 
@@ -41,18 +39,16 @@ class FunctionsManagerDialog(QtWidgets.QDialog):
         self.setObjectName("FunctionsManagerDialog")
         self.resize(404, 294)
         self.setSizeGripEnabled(True)
-        self.setWindowFlags(QtCore.Qt.Window)
+        self.setWindowFlags(QtCore.Qt.WindowType.Window)
         self.verticalLayout = QtWidgets.QVBoxLayout(self)
-        self.widget = FunctionsManager(
-            deepcopy(definitions), channels, selected_definition
-        )
+        self.widget = FunctionsManager(deepcopy(definitions), channels, selected_definition)
 
         self.verticalLayout.addWidget(self.widget)
 
         self.horLayout = QtWidgets.QHBoxLayout(self)
 
         spacer = QtWidgets.QSpacerItem(
-            40, 20, QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum
+            40, 20, QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Minimum
         )
         self.apply_btn = QtWidgets.QPushButton("Apply")
         self.cancel_btn = QtWidgets.QPushButton("Cancel")

@@ -2,6 +2,7 @@
 asammdf
 
 """
+
 from pathlib import Path
 
 from numpy import get_include
@@ -35,6 +36,7 @@ def _get_ext_modules():
             "asammdf.blocks.cutils",
             ["src/asammdf/blocks/cutils.c"],
             include_dirs=[get_include()],
+            extra_compile_args=["-std=c99"],
         )
     ]
 
@@ -76,6 +78,7 @@ setup(
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
     ],
     # Supported python versions
     python_requires=">=3.8",
@@ -98,24 +101,26 @@ setup(
     # for example:
     # $ pip install -e .[dev,test]
     extras_require={
-        "decode": ["cChardet==2.1.5", "chardet"],
+        "decode": ["faust-cchardet==2.1.19", "chardet"],
         "export": [
             "fastparquet",
             "h5py",
-            "hdf5storage>=0.1.17",
+            "hdf5storage>=0.1.19",
             "python-snappy",
         ],
         "export_matlab_v5": "scipy",
         "gui": [
-            "lxml",
+            "lxml>=4.9.2",
             "natsort",
             "psutil",
-            "PySide6",
-            "pyqtgraph>=0.12.4",
-            "pyqtlet2>=0.8.0",
+            "PySide6==6.6.0",
+            "pyqtgraph==0.13.3",
+            "pyqtlet2==0.9.3",
+            "packaging",
+            "QtPy==2.3.1",
         ],
         "encryption": ["cryptography", "keyring"],
-        "symbolic_math": "numexpr3",
+        "symbolic_math": "sympy",
         "filesystem": "fsspec",
     },
     # If there are data files included in your packages that need to be
@@ -125,14 +130,12 @@ setup(
     include_package_data=True,
     # Although 'package_data' is the preferred approach, in some case you may
     # need to place data files outside of your packages. See:
-    # http://docs.python.org/3.4/distutils/setupscript.html#installing-additional-files # noqa
+    # http://docs.python.org/3.4/distutils/setupscript.html#installing-additional-files
     # In this case, 'data_file' will be installed into '<sys.prefix>/my_data'
     #    data_files=[('my_data', ['data/data_file'])],
     # To provide executable scripts, use entry points in preference to the
     # "scripts" keyword. Entry points provide cross-platform support and allow
     # pip to create the appropriate form of executable for the target platform.
-    entry_points={
-        "console_scripts": ["asammdf = asammdf.gui.asammdfgui:main [gui,export,decode]"]
-    },
+    entry_points={"console_scripts": ["asammdf = asammdf.gui.asammdfgui:main [gui,export,decode]"]},
     ext_modules=_get_ext_modules(),
 )

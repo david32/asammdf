@@ -1,18 +1,16 @@
-# -*- coding: utf-8 -*-
 from functools import partial
 import inspect
 import os
 import re
-from traceback import format_exc
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ...signal import Signal
-from ..ui import resource_rc
 from ..ui.define_channel_dialog import Ui_ComputedChannel
 from ..utils import computation_to_python_function
 from ..widgets.python_highlighter import PythonHighlighter
 from .advanced_search import AdvancedSearch
+from .messagebox import MessageBox
 
 SIG_RE = re.compile(r"\{\{(?!\}\})(?P<name>.*?)\}\}")
 
@@ -30,7 +28,7 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
         super().__init__(*args, **kwargs)
         self.setupUi(self)
 
-        self.setWindowFlags(QtCore.Qt.WindowMinMaxButtonsHint | self.windowFlags())
+        self.setWindowFlags(QtCore.Qt.WindowType.WindowMinMaxButtonsHint | self.windowFlags())
 
         self.mdf = mdf
         self.result = None
@@ -39,7 +37,7 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
 
         self.arg_widgets = []
         spacer = QtWidgets.QSpacerItem(
-            20, 20, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Expanding
+            20, 20, QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Expanding
         )
         self.arg_layout.addItem(spacer, len(self.arg_widgets) + 2, 0)
         self.arg_widgets.append(spacer)
@@ -69,9 +67,7 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
         if computation:
             computation = computation_to_python_function(computation)
 
-            self.name.setText(
-                computation.get("channel_name", computation.get("channel", ""))
-            )
+            self.name.setText(computation.get("channel_name", computation.get("channel", "")))
             self.unit.setText(computation.get("channel_unit", ""))
             self.comment.setPlainText(computation.get("channel_comment", ""))
 
@@ -150,9 +146,7 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
                 "channel_comment": self.comment.toPlainText().strip(),
                 "triggering": triggering,
                 "triggering_value": triggering_value,
-                "computation_mode": "sample_by_sample"
-                if self.sample_by_sample.isChecked()
-                else "complete_signal",
+                "computation_mode": "sample_by_sample" if self.sample_by_sample.isChecked() else "complete_signal",
             },
         }
 
@@ -170,6 +164,7 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
             for widget in widgets:
                 self.arg_layout.removeWidget(widget)
                 widget.setParent(None)
+                widget.deleteLater()
 
         self.arg_layout.removeItem(self.arg_widgets[-1])
 
@@ -180,9 +175,7 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
         func = locals()[name]
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/search.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/search.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
 
         parameters = list(inspect.signature(func).parameters)[:-1]
         for i, arg_name in enumerate(parameters, 2):
@@ -198,7 +191,7 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
             self.arg_widgets.append((label, text_edit, button))
 
         spacer = QtWidgets.QSpacerItem(
-            20, 20, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Expanding
+            20, 20, QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Expanding
         )
 
         self.arg_layout.addItem(spacer, len(self.arg_widgets) + 2, 0)
@@ -249,21 +242,19 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
             PythonHighlighter(info.document())
             info.setReadOnly(True)
             info.setLineWrapMode(info.NoWrap)
-            info.setWindowFlags(QtCore.Qt.WindowMinMaxButtonsHint | info.windowFlags())
+            info.setWindowFlags(QtCore.Qt.WindowType.WindowMinMaxButtonsHint | info.windowFlags())
             info.setWindowTitle(f"{function} definition")
-            info.setWindowModality(QtCore.Qt.ApplicationModal)
+            info.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
 
             p = info.palette()
-            for active in (QtGui.QPalette.Active, QtGui.QPalette.Inactive):
-                p.setColor(active, QtGui.QPalette.Base, QtGui.QColor("#131314"))
-                p.setColor(active, QtGui.QPalette.WindowText, QtGui.QColor("#ffffff"))
-                p.setColor(active, QtGui.QPalette.Text, QtGui.QColor("#ffffff"))
+            for active in (QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorGroup.Inactive):
+                p.setColor(active, QtGui.QPalette.ColorRole.Base, QtGui.QColor("#131314"))
+                p.setColor(active, QtGui.QPalette.ColorRole.WindowText, QtGui.QColor("#ffffff"))
+                p.setColor(active, QtGui.QPalette.ColorRole.Text, QtGui.QColor("#ffffff"))
             info.setPalette(p)
 
             icon = QtGui.QIcon()
-            icon.addPixmap(
-                QtGui.QPixmap(":/info.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-            )
+            icon.addPixmap(QtGui.QPixmap(":/info.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
             info.setWindowIcon(icon)
 
             info.show()
@@ -275,14 +266,14 @@ class DefineChannel(Ui_ComputedChannel, QtWidgets.QDialog):
         else:
             if self.computation:
                 function = self.computation["function"]
-                QtWidgets.QMessageBox.warning(
+                MessageBox.warning(
                     self,
                     f"{function} definition missing",
                     f"The function {function} was not found in the Functions manager",
                 )
             else:
-                QtWidgets.QMessageBox.warning(
+                MessageBox.warning(
                     self,
-                    f"No function selected",
-                    f"Please select one of the fucntion defined in the Functions manager",
+                    "No function selected",
+                    "Please select one of the fucntion defined in the Functions manager",
                 )

@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>1091</width>
-    <height>676</height>
+    <height>678</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -99,7 +99,7 @@
       <item row="2" column="1">
        <widget class="QLabel" name="label_3">
         <property name="text">
-         <string>F</string>
+         <string>F or Shift+F</string>
         </property>
         <property name="alignment">
          <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
@@ -120,7 +120,7 @@
       <item row="1" column="1">
        <widget class="QLabel" name="label">
         <property name="text">
-         <string>O</string>
+         <string>O or Shift+O</string>
         </property>
         <property name="alignment">
          <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
@@ -141,7 +141,7 @@
       <item row="0" column="1">
        <widget class="QLabel" name="label_2">
         <property name="text">
-         <string>I</string>
+         <string>I or Shift+I</string>
         </property>
         <property name="alignment">
          <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
@@ -348,6 +348,22 @@
    </item>
   </layout>
  </widget>
+ <tabstops>
+  <tabstop>signal</tabstop>
+  <tabstop>target_max</tabstop>
+  <tabstop>target_min</tabstop>
+  <tabstop>zoom_in_btn</tabstop>
+  <tabstop>zoom_out_btn</tabstop>
+  <tabstop>fit_btn</tabstop>
+  <tabstop>shift_up_btn</tabstop>
+  <tabstop>shift_down_btn</tabstop>
+  <tabstop>fast_shift_up_btn</tabstop>
+  <tabstop>fast_shift_down_btn</tabstop>
+  <tabstop>scaling</tabstop>
+  <tabstop>offset</tabstop>
+  <tabstop>apply_btn</tabstop>
+  <tabstop>cancel_btn</tabstop>
+ </tabstops>
  <resources>
   <include location="resource.qrc"/>
  </resources>

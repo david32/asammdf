@@ -1,13 +1,11 @@
-# -*- coding: utf-8 -*-
-
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from asammdf.blocks import v4_constants as v4c
 from asammdf.blocks.conversion_utils import from_dict
 
-from ..ui import resource_rc
 from ..ui.define_conversion_dialog import Ui_ConversionDialog
+from .messagebox import MessageBox
 
 
 # from https://stackoverflow.com/a/53936965/11009349
@@ -26,9 +24,7 @@ class ConversionEditor(Ui_ConversionDialog, QtWidgets.QDialog):
         self.vrtt_default_conversion = None
 
         self.vtt_default_mode.currentIndexChanged.connect(self.vtt_mode.setCurrentIndex)
-        self.vrtt_default_mode.currentIndexChanged.connect(
-            self.vrtt_mode.setCurrentIndex
-        )
+        self.vrtt_default_mode.currentIndexChanged.connect(self.vrtt_mode.setCurrentIndex)
 
         self.vtt_default_btn.clicked.connect(self.edit_vtt_default_conversion)
         self.vrtt_default_btn.clicked.connect(self.edit_vrtt_default_conversion)
@@ -80,25 +76,19 @@ class ConversionEditor(Ui_ConversionDialog, QtWidgets.QDialog):
                     self.vtt_default_mode.setCurrentIndex(0)
 
                     self.vtt_default.setText(
-                        conversion.referenced_blocks["default_addr"].decode(
-                            "utf-8", errors="replace"
-                        )
+                        conversion.referenced_blocks["default_addr"].decode("utf-8", errors="replace")
                     )
                 else:
                     self.vtt_default_mode.setCurrentIndex(1)
 
-                    self.vtt_default_conversion = conversion.referenced_blocks[
-                        "default_addr"
-                    ]
+                    self.vtt_default_conversion = conversion.referenced_blocks["default_addr"]
 
                 for i in range(conversion.ref_param_nr - 1):
                     if isinstance(conversion.referenced_blocks[f"text_{i}"], bytes):
                         widget = VTTWidget(
                             mode="text",
                             value=conversion[f"val_{i}"],
-                            text=conversion.referenced_blocks[f"text_{i}"].decode(
-                                "utf-8", errors="replace"
-                            ),
+                            text=conversion.referenced_blocks[f"text_{i}"].decode("utf-8", errors="replace"),
                         )
 
                     else:
@@ -121,16 +111,12 @@ class ConversionEditor(Ui_ConversionDialog, QtWidgets.QDialog):
                     self.vrtt_default_mode.setCurrentIndex(0)
 
                     self.vrtt_default.setText(
-                        conversion.referenced_blocks["default_addr"].decode(
-                            "utf-8", errors="replace"
-                        )
+                        conversion.referenced_blocks["default_addr"].decode("utf-8", errors="replace")
                     )
                 else:
                     self.vrtt_default_mode.setCurrentIndex(1)
 
-                    self.vrtt_default_conversion = conversion.referenced_blocks[
-                        "default_addr"
-                    ]
+                    self.vrtt_default_conversion = conversion.referenced_blocks["default_addr"]
 
                 for i in range(conversion.ref_param_nr - 1):
                     if isinstance(conversion.referenced_blocks[f"text_{i}"], bytes):
@@ -138,9 +124,7 @@ class ConversionEditor(Ui_ConversionDialog, QtWidgets.QDialog):
                             mode="text",
                             lower=conversion[f"lower_{i}"],
                             upper=conversion[f"upper_{i}"],
-                            text=conversion.referenced_blocks[f"text_{i}"].decode(
-                                "utf-8", errors="replace"
-                            ),
+                            text=conversion.referenced_blocks[f"text_{i}"].decode("utf-8", errors="replace"),
                         )
 
                     else:
@@ -179,13 +163,13 @@ class ConversionEditor(Ui_ConversionDialog, QtWidgets.QDialog):
 
         self.pressed_button = None
 
-        self.setWindowFlag(QtCore.Qt.WindowMinimizeButtonHint, True)
-        self.setWindowFlag(QtCore.Qt.WindowMaximizeButtonHint, True)
+        self.setWindowFlag(QtCore.Qt.WindowType.WindowMinimizeButtonHint, True)
+        self.setWindowFlag(QtCore.Qt.WindowType.WindowMaximizeButtonHint, True)
 
     def apply(self, event):
         if self.tabs.currentIndex() == 1:
             if (self.p4.value(), self.p5.value(), self.p6.value()) == (0, 0, 0):
-                QtWidgets.QMessageBox.warning(
+                MessageBox.warning(
                     self,
                     "Invalid conversion parameters",
                     "The rational conversion parameters P4, P5 and P6 cannot all be 0.",
@@ -205,7 +189,7 @@ class ConversionEditor(Ui_ConversionDialog, QtWidgets.QDialog):
                 value = int(widget.value.value())
 
                 if value in mapping:
-                    QtWidgets.QMessageBox.warning(
+                    MessageBox.warning(
                         self,
                         "Invalid conversion parameters",
                         f"The value-to-text conversion raw value {value} is defined multiple times.",
@@ -228,7 +212,7 @@ class ConversionEditor(Ui_ConversionDialog, QtWidgets.QDialog):
                 upper = int(widget.upper.value())
 
                 if upper < lower:
-                    QtWidgets.QMessageBox.warning(
+                    MessageBox.warning(
                         self,
                         "Invalid conversion parameters",
                         f"The upper value must be greater or higher than the lower value. ({upper=} and {lower=}",
@@ -239,7 +223,7 @@ class ConversionEditor(Ui_ConversionDialog, QtWidgets.QDialog):
                     y = range(lower, upper)
                     for x in mapping:
                         if range_overlapping(x, y):
-                            QtWidgets.QMessageBox.warning(
+                            MessageBox.warning(
                                 self,
                                 "Invalid conversion parameters",
                                 f"The ranges cannot overlap; {x} overlaps with {y}",
@@ -290,9 +274,7 @@ class ConversionEditor(Ui_ConversionDialog, QtWidgets.QDialog):
                 }
 
                 if self.vtt_default_mode.currentIndex() == 0:
-                    conversion["default"] = (
-                        self.vtt_default.text().strip().encode("utf-8")
-                    )
+                    conversion["default"] = self.vtt_default.text().strip().encode("utf-8")
                 else:
                     conversion["default"] = self.vtt_default_conversion
 
@@ -319,9 +301,7 @@ class ConversionEditor(Ui_ConversionDialog, QtWidgets.QDialog):
                 }
 
                 if self.vrtt_default_mode.currentIndex() == 0:
-                    conversion["default"] = (
-                        self.vrtt_default.text().strip().encode("utf-8")
-                    )
+                    conversion["default"] = self.vrtt_default.text().strip().encode("utf-8")
                 else:
                     conversion["default"] = self.vrtt_default_conversion
 
@@ -354,19 +334,27 @@ class ConversionEditor(Ui_ConversionDialog, QtWidgets.QDialog):
         return conversion
 
     def edit_vtt_default_conversion(self):
-        dlg = ConversionEditor(f"default", self.vtt_default_conversion, parent=self)
+        dlg = ConversionEditor("default", self.vtt_default_conversion, parent=self)
         dlg.exec_()
         if dlg.pressed_button == "apply":
             self.vtt_default_conversion = dlg.conversion()
 
     def edit_vrtt_default_conversion(self):
-        dlg = ConversionEditor(f"default", self.vrtt_default_conversion, parent=self)
+        dlg = ConversionEditor("default", self.vrtt_default_conversion, parent=self)
         dlg.exec_()
         if dlg.pressed_button == "apply":
             self.vrtt_default_conversion = dlg.conversion()
 
     def insert(self, event):
-        widget = VTTWidget()
+        count = self.vtt_list.count()
+        if count:
+            item = self.vtt_list.item(count - 1)
+            last = self.vtt_list.itemWidget(item)
+            value = last.value.value() + 1
+        else:
+            value = 0
+
+        widget = VTTWidget(value=value)
 
         item = QtWidgets.QListWidgetItem()
         item.setSizeHint(widget.sizeHint())
@@ -374,7 +362,18 @@ class ConversionEditor(Ui_ConversionDialog, QtWidgets.QDialog):
         self.vtt_list.setItemWidget(item, widget)
 
     def insert_vrtt(self, event):
-        widget = VRTTWidget()
+        count = self.vrtt_list.count()
+        if count:
+            item = self.vrtt_list.item(count - 1)
+            last = self.vrtt_list.itemWidget(item)
+            lower = last.upper.value()
+            upper = lower + 1
+
+        else:
+            lower = 0
+            upper = 1
+
+        widget = VRTTWidget(lower=lower, upper=upper)
 
         item = QtWidgets.QListWidgetItem()
         item.setSizeHint(widget.sizeHint())

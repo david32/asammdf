@@ -1,10 +1,8 @@
-# -*- coding: utf-8 -*-
 from copy import deepcopy
 
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from ..ui import resource_rc
 from ..ui.channel_stats import Ui_ChannelStats
 
 MONOSPACE_FONT = None
@@ -52,16 +50,16 @@ class ChannelStats(Ui_ChannelStats, QtWidgets.QWidget):
             label = self.findChild(QtWidgets.QLabel, f"xunit{i}")
             label.setText(f" {self.xunit}")
 
-        self.precision.addItems(
-            ["Full float precision"] + [f"{i} float decimals" for i in range(16)]
-        )
-        self.precision.setCurrentIndex(
-            self._settings.value("stats_float_precision", 6, type=int) + 1
-        )
+        self.precision.addItems(["Full float precision"] + [f"{i} float decimals" for i in range(16)])
+        self.precision.setCurrentIndex(self._settings.value("stats_float_precision", 6, type=int) + 1)
 
         self.precision.currentIndexChanged.connect(self.set_float_precision)
 
     def set_stats(self, stats):
+        if not stats:
+            self.clear()
+            return
+
         self._stats = deepcopy(stats)
         precision = self._settings.value("stats_float_precision", 6, type=int)
         fmt = f" {{:.{precision}f}}"
@@ -116,7 +114,7 @@ class ChannelStats(Ui_ChannelStats, QtWidgets.QWidget):
         for k, group in enumerate(
             (
                 self.cursor_group,
-                self.range_group,
+                self.region_group,
                 self.visible_group,
                 self.overall_group,
             )

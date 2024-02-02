@@ -1,13 +1,11 @@
-# -*- coding: utf-8 -*-
 import os
 import re
 
-from natsort import natsorted
 import numpy as np
 from numpy import searchsorted
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from ..ui import resource_rc
+from ..dialogs.messagebox import MessageBox
 from ..ui.bar import Ui_BarDisplay
 from ..utils import COLORS
 from .channel_bar_display import ChannelBarDisplay
@@ -113,13 +111,11 @@ class Bar(Ui_BarDisplay, QtWidgets.QWidget):
                 invalid_indexes = invalid_indexes[:10] + 1
                 idx = invalid_indexes[0]
                 ts = channel.timestamps[idx - 1 : idx + 2]
-                invalid.append(
-                    f"{channel.name} @ index {invalid_indexes[:10] - 1} with first time stamp error: {ts}"
-                )
+                invalid.append(f"{channel.name} @ index {invalid_indexes[:10] - 1} with first time stamp error: {ts}")
 
         if invalid:
             errors = "\n".join(invalid)
-            QtWidgets.QMessageBox.warning(
+            MessageBox.warning(
                 self,
                 "The following channels do not have monotonous increasing time stamps:",
                 f"The following channels do not have monotonous increasing time stamps:\n{errors}",
@@ -145,7 +141,7 @@ class Bar(Ui_BarDisplay, QtWidgets.QWidget):
                 valid.append(channel)
 
         if invalid:
-            QtWidgets.QMessageBox.warning(
+            MessageBox.warning(
                 self,
                 "All NaN channels will not be plotted:",
                 f"The following channels have all NaN samples and will not be plotted:\n{', '.join(invalid)}",
@@ -166,7 +162,7 @@ class Bar(Ui_BarDisplay, QtWidgets.QWidget):
                 self.channels,
                 sig.origin_uuid,
             )
-            item.setData(QtCore.Qt.UserRole, sig.name)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, sig.name)
             tooltip = getattr(sig, "tooltip", "") or sig.comment
 
             it = ChannelBarDisplay(
@@ -180,7 +176,7 @@ class Bar(Ui_BarDisplay, QtWidgets.QWidget):
                 tooltip,
                 self,
             )
-            it.setAttribute(QtCore.Qt.WA_StyledBackground)
+            it.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground)
 
             if sig.computed:
                 font = QtGui.QFont()
@@ -200,19 +196,19 @@ class Bar(Ui_BarDisplay, QtWidgets.QWidget):
         modifier = event.modifiers()
 
         if (
-            key in (QtCore.Qt.Key_H, QtCore.Qt.Key_B, QtCore.Qt.Key_P)
-            and modifier == QtCore.Qt.ControlModifier
+            key in (QtCore.Qt.Key.Key_H, QtCore.Qt.Key.Key_B, QtCore.Qt.Key.Key_P)
+            and modifier == QtCore.Qt.KeyboardModifier.ControlModifier
         ):
-            if key == QtCore.Qt.Key_H:
+            if key == QtCore.Qt.Key.Key_H:
                 self.format_selection.setCurrentText("hex")
-            elif key == QtCore.Qt.Key_B:
+            elif key == QtCore.Qt.Key.Key_B:
                 self.format_selection.setCurrentText("bin")
             else:
                 self.format_selection.setCurrentText("phys")
             event.accept()
-        elif key == QtCore.Qt.Key_Right and modifier == QtCore.Qt.NoModifier:
+        elif key == QtCore.Qt.Key.Key_Right and modifier == QtCore.Qt.KeyboardModifier.NoModifier:
             self.timestamp_slider.setValue(self.timestamp_slider.value() + 1)
-        elif key == QtCore.Qt.Key_Left and modifier == QtCore.Qt.NoModifier:
+        elif key == QtCore.Qt.Key.Key_Left and modifier == QtCore.Qt.KeyboardModifier.NoModifier:
             self.timestamp_slider.setValue(self.timestamp_slider.value() - 1)
         else:
             super().keyPressEvent(event)
@@ -220,10 +216,7 @@ class Bar(Ui_BarDisplay, QtWidgets.QWidget):
     def to_config(self):
         channels = []
         iterator = QtWidgets.QTreeWidgetItemIterator(self.channels)
-        while 1:
-            item = iterator.value()
-            if not item:
-                break
+        while item := iterator.value():
             channels.append(item.text(0))
             iterator += 1
 
@@ -236,19 +229,17 @@ class Bar(Ui_BarDisplay, QtWidgets.QWidget):
         return config
 
     def search_forward(self):
-        if (
-            self.op.currentIndex() < 0
-            or not self.target.text().strip()
-            or not self.pattern_match.text().strip()
-        ):
+        if self.op.currentIndex() < 0 or not self.target.text().strip() or not self.pattern_match.text().strip():
             self.match.setText("invalid input values")
             return
 
         operator = self.op.currentText()
 
-        pattern = self.pattern_match.text().strip().replace("*", "_WILDCARD_")
+        wildcard = f"{os.urandom(6).hex()}_WILDCARD_{os.urandom(6).hex()}"
+        text = self.pattern_match.text().strip()
+        pattern = text.replace("*", wildcard)
         pattern = re.escape(pattern)
-        pattern = pattern.replace("_WILDCARD_", ".*")
+        pattern = pattern.replace(wildcard, ".*")
 
         pattern = re.compile(f"(?i){pattern}")
         matches = [name for name in self.signals if pattern.search(name)]
@@ -295,11 +286,7 @@ class Bar(Ui_BarDisplay, QtWidgets.QWidget):
                 self.match.setText("condition not found")
 
     def search_backward(self):
-        if (
-            self.op.currentIndex() < 0
-            or not self.target.text().strip()
-            or not self.pattern_match.text().strip()
-        ):
+        if self.op.currentIndex() < 0 or not self.target.text().strip() or not self.pattern_match.text().strip():
             self.match.setText("invalid input values")
             return
 
@@ -319,7 +306,7 @@ class Bar(Ui_BarDisplay, QtWidgets.QWidget):
         try:
             target = float(self.target.text().strip())
         except:
-            self.match.setText(f"the target must a numeric value")
+            self.match.setText("the target must a numeric value")
         else:
             if target.is_integer():
                 target = int(target)
@@ -351,7 +338,7 @@ class Bar(Ui_BarDisplay, QtWidgets.QWidget):
                 self.timestamp.setValue(timestamp)
                 self.match.setText(f"condition found for {signal_name}")
             else:
-                self.match.setText(f"condition not found")
+                self.match.setText("condition not found")
 
     def set_format(self, fmt):
         self.format = fmt

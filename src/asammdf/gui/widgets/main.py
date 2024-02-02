@@ -1,19 +1,22 @@
-# -*- coding: utf-8 -*-
 from functools import partial
 import gc
 import os
 from pathlib import Path
 import platform
+import sys
 from textwrap import wrap
 import webbrowser
 
 from natsort import natsorted
 import pyqtgraph as pg
+from PySide6 import __version__ as pyside6_version
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ...version import __version__ as libversion
 from ..dialogs.bus_database_manager import BusDatabaseManagerDialog
+from ..dialogs.dependencies_dlg import DependenciesDlg
 from ..dialogs.functions_manager import FunctionsManagerDialog
+from ..dialogs.messagebox import MessageBox
 from ..dialogs.multi_search import MultiSearch
 from ..ui.main_window import Ui_PyMDFMainWindow
 from ..utils import draw_color_icon
@@ -26,27 +29,19 @@ from .plot import Plot
 class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
     def __init__(self, files=None, *args, **kwargs):
         super(Ui_PyMDFMainWindow, self).__init__(*args, **kwargs)
-        WithMDIArea.__init__(self)
+        WithMDIArea.__init__(self, comparison=True)
         self.setupUi(self)
         self._settings = QtCore.QSettings()
         self._settings.setValue("current_theme", self._settings.value("theme", "Light"))
         self._light_palette = self.palette()
 
-        self.line_width = 1
-
-        self.ignore_value2text_conversions = self._settings.value(
-            "ignore_value2text_conversions", False, type=bool
-        )
+        self.ignore_value2text_conversions = self._settings.value("ignore_value2text_conversions", False, type=bool)
 
         self.display_cg_name = self._settings.value("display_cg_name", False, type=bool)
 
-        self.integer_interpolation = int(
-            self._settings.value("integer_interpolation", "2 - hybrid interpolation")[0]
-        )
+        self.integer_interpolation = int(self._settings.value("integer_interpolation", "2 - hybrid interpolation")[0])
 
-        self.float_interpolation = int(
-            self._settings.value("float_interpolation", "1 - linear interpolation")[0]
-        )
+        self.float_interpolation = int(self._settings.value("float_interpolation", "1 - linear interpolation")[0])
 
         self.batch = BatchWidget(
             self.ignore_value2text_conversions,
@@ -61,15 +56,13 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
 
         multi_search = QtWidgets.QPushButton("Search")
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/search.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/search.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         multi_search.setIcon(icon)
         multi_search.clicked.connect(self.comparison_search)
 
         multi_info = QtWidgets.QPushButton("Measurements information")
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/info.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/info.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         multi_info.setIcon(icon)
         multi_info.clicked.connect(self.comparison_info)
 
@@ -80,8 +73,8 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
 
         self.mdi_area = MdiAreaWidget(self)
         self.mdi_area.add_window_request.connect(self.add_window)
-        self.mdi_area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
-        self.mdi_area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self.mdi_area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.mdi_area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         layout.addLayout(hbox)
         layout.addWidget(self.mdi_area)
@@ -91,14 +84,13 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
 
         self.progress = None
 
-        self.files.currentChanged.connect(self.onFileTabChange)
         self.files.tabCloseRequested.connect(self.close_file)
         self.stackedWidget.currentChanged.connect(self.mode_changed)
 
         menu = self.menubar.addMenu("File")
         open_group = QtGui.QActionGroup(self)
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/open.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/open.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
 
         action = QtGui.QAction(icon, "Open", menu)
         action.triggered.connect(self.open)
@@ -119,7 +111,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         open_group.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/save.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/save.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "Save configuration", menu)
         action.triggered.connect(self.save_configuration)
         open_group.addAction(action)
@@ -130,21 +122,19 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         mode_actions = QtGui.QActionGroup(self)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/file.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/file.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}".format("Single files"), menu)
         action.triggered.connect(partial(self.stackedWidget.setCurrentIndex, 0))
         mode_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/list.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/list.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}".format("Batch processing"), menu)
         action.triggered.connect(partial(self.stackedWidget.setCurrentIndex, 1))
         mode_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/compare.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/compare.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}".format("Comparison"), menu)
         action.triggered.connect(partial(self.stackedWidget.setCurrentIndex, 2))
         mode_actions.addAction(action)
@@ -264,8 +254,8 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
             icon = QtGui.QIcon()
             icon.addPixmap(
                 QtGui.QPixmap(f":/{option}_interconnect.png"),
-                QtGui.QIcon.Normal,
-                QtGui.QIcon.Off,
+                QtGui.QIcon.Mode.Normal,
+                QtGui.QIcon.State.Off,
             )
             action = QtGui.QAction(icon, option, menu)
             action.setCheckable(True)
@@ -303,9 +293,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
             theme_option.addAction(action)
             action.triggered.connect(partial(self.set_integer_interpolation, option))
 
-            if option == self._settings.value(
-                "integer_interpolation", "2 - hybrid interpolation"
-            ):
+            if option == self._settings.value("integer_interpolation", "2 - hybrid interpolation"):
                 action.setChecked(True)
                 action.triggered.emit()
 
@@ -323,9 +311,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
             theme_option.addAction(action)
             action.triggered.connect(partial(self.set_float_interpolation, option))
 
-            if option == self._settings.value(
-                "float_interpolation", "1 - linear interpolation"
-            ):
+            if option == self._settings.value("float_interpolation", "1 - linear interpolation"):
                 action.setChecked(True)
                 action.triggered.emit()
 
@@ -347,9 +333,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         action.setText("Line width")
         combo = QtWidgets.QComboBox()
         combo.addItems([f"{size}pixels width" for size in range(1, 5)])
-        combo.currentIndexChanged.connect(
-            partial(self.edit_cursor_options, action=action)
-        )
+        combo.currentIndexChanged.connect(partial(self.edit_cursor_options, action=action))
         action.setDefaultWidget(combo)
 
         submenu.addAction(action)
@@ -363,9 +347,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         action = QtGui.QAction("Show horizontal line")
         action.setCheckable(True)
         action.toggled.connect(partial(self.edit_cursor_options, action=action))
-        action.setChecked(
-            self._settings.value("show_cursor_horizontal_line", False, type=bool)
-        )
+        action.setChecked(self._settings.value("show_cursor_horizontal_line", False, type=bool))
         submenu.addAction(action)
 
         menu.addMenu(submenu)
@@ -376,145 +358,118 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         plot_actions = QtGui.QActionGroup(self)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/fit.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/fit.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         fullscreen = QtGui.QAction(icon, f"{'Fullscreen': <20}\tF11", menu)
         fullscreen.triggered.connect(self.toggle_fullscreen)
-        fullscreen.setShortcut(QtCore.Qt.Key_F11)
+        fullscreen.setShortcut(QtCore.Qt.Key.Key_F11)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/fit.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/fit.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, f"{'Fit all': <20}\tF", menu)
-        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key_F))
-        action.setShortcut(QtCore.Qt.Key_F)
+        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key.Key_F))
+        action.setShortcut(QtCore.Qt.Key.Key_F)
         plot_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/fit.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/fit.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, f"{'Fit selected': <20}\tShift+F", menu)
         action.triggered.connect(
-            partial(
-                self.plot_action, key=QtCore.Qt.Key_F, modifier=QtCore.Qt.ShiftModifier
-            )
+            partial(self.plot_action, key=QtCore.Qt.Key.Key_F, modifier=QtCore.Qt.KeyboardModifier.ShiftModifier)
         )
         action.setShortcut(QtGui.QKeySequence("Shift+F"))
         plot_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/grid.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/grid.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}\tG".format("Grid"), menu)
-        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key_G))
-        action.setShortcut(QtCore.Qt.Key_G)
+        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key.Key_G))
+        action.setShortcut(QtCore.Qt.Key.Key_G)
         plot_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/axis.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/axis.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}\tH".format("Honeywell"), menu)
-        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key_H))
-        action.setShortcut(QtCore.Qt.Key_H)
+        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key.Key_H))
+        action.setShortcut(QtCore.Qt.Key.Key_H)
         plot_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/home.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/home.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}\tW".format("Home"), menu)
-        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key_W))
-        action.setShortcut(QtCore.Qt.Key_W)
+        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key.Key_W))
+        action.setShortcut(QtCore.Qt.Key.Key_W)
         plot_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/list2.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/list2.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}\tS".format("Stack all"), menu)
-        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key_S))
-        action.setShortcut(QtCore.Qt.Key_S)
+        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key.Key_S))
+        action.setShortcut(QtCore.Qt.Key.Key_S)
         plot_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/list2.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/list2.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}\tShift+S".format("Stack selected"), menu)
         action.triggered.connect(
-            partial(
-                self.plot_action, key=QtCore.Qt.Key_S, modifier=QtCore.Qt.ShiftModifier
-            )
+            partial(self.plot_action, key=QtCore.Qt.Key.Key_S, modifier=QtCore.Qt.KeyboardModifier.ShiftModifier)
         )
         action.setShortcut(QtGui.QKeySequence("Shift+S"))
         plot_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/zoom-in.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/zoom-in.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}\tI".format("Zoom in"), menu)
-        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key_I))
-        action.setShortcut(QtCore.Qt.Key_I)
+        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key.Key_I))
+        action.setShortcut(QtCore.Qt.Key.Key_I)
         plot_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/zoom-out.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/zoom-out.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}\tO".format("Zoom out"), menu)
-        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key_O))
-        action.setShortcut(QtCore.Qt.Key_O)
+        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key.Key_O))
+        action.setShortcut(QtCore.Qt.Key.Key_O)
         plot_actions.addAction(action)
 
         action = QtGui.QAction("{: <20}\tX".format("Zoom to range"), menu)
-        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key_X))
-        action.setShortcut(QtCore.Qt.Key_X)
+        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key.Key_X))
+        action.setShortcut(QtCore.Qt.Key.Key_X)
         plot_actions.addAction(action)
 
         action = QtGui.QAction("{: <20}\t.".format("Toggle dots"), menu)
-        action.triggered.connect(partial(self.toggle_dots, key=QtCore.Qt.Key_Period))
-        action.setShortcut(QtCore.Qt.Key_Period)
+        action.triggered.connect(partial(self.toggle_dots, key=QtCore.Qt.Key.Key_Period))
+        action.setShortcut(QtCore.Qt.Key.Key_Period)
         plot_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/focus.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/focus.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}\t2".format("Focused mode"), menu)
-        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key_2))
-        action.setShortcut(QtCore.Qt.Key_2)
+        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key.Key_2))
+        action.setShortcut(QtCore.Qt.Key.Key_2)
         plot_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/plus.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/plus.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}\tIns".format("Insert computation"), menu)
-        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key_Insert))
-        action.setShortcut(QtCore.Qt.Key_Insert)
+        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key.Key_Insert))
+        action.setShortcut(QtCore.Qt.Key.Key_Insert)
         plot_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/save.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
-        action = QtGui.QAction(
-            icon, "{: <20}\tCtrl+S".format("Save active subplot channels"), menu
-        )
+        icon.addPixmap(QtGui.QPixmap(":/save.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
+        action = QtGui.QAction(icon, "{: <20}\tCtrl+S".format("Save active subplot channels"), menu)
         action.triggered.connect(
             partial(
                 self.plot_action,
-                key=QtCore.Qt.Key_S,
-                modifier=QtCore.Qt.ControlModifier,
+                key=QtCore.Qt.Key.Key_S,
+                modifier=QtCore.Qt.KeyboardModifier.ControlModifier,
             )
         )
         action.setShortcut(QtGui.QKeySequence("Ctrl+S"))
         plot_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/save.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
-        action = QtGui.QAction(
-            icon, "{: <20}\tCtrl+Shift+S".format("Save all subplot channels"), menu
-        )
-        action.triggered.connect(self.save_all_subplots)
-        action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+S"))
-        plot_actions.addAction(action)
-
-        icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/save.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
-        action = QtGui.QAction(
-            icon, "{: <20}\tCtrl+Shift+S".format("Save all subplot channels"), menu
-        )
+        icon.addPixmap(QtGui.QPixmap(":/save.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
+        action = QtGui.QAction(icon, "{: <20}\tCtrl+Shift+S".format("Save all subplot channels"), menu)
         action.triggered.connect(self.save_all_subplots)
         action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+S"))
         plot_actions.addAction(action)
@@ -524,68 +479,52 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         channel_shift_actions = QtGui.QActionGroup(self)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/shift_left.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
-        action = QtGui.QAction(
-            icon, "{: <20}\tShift+←".format("Shift channels left"), menu
-        )
+        icon.addPixmap(QtGui.QPixmap(":/shift_left.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
+        action = QtGui.QAction(icon, "{: <20}\tShift+←".format("Shift channels left"), menu)
         action.triggered.connect(
             partial(
                 self.plot_action,
-                key=QtCore.Qt.Key_Left,
-                modifier=QtCore.Qt.ShiftModifier,
+                key=QtCore.Qt.Key.Key_Left,
+                modifier=QtCore.Qt.KeyboardModifier.ShiftModifier,
             )
         )
         action.setShortcut(QtGui.QKeySequence("Shift+Left"))
         channel_shift_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/shift_right.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
-        action = QtGui.QAction(
-            icon, "{: <20}\tShift+→".format("Shift channels right"), menu
-        )
+        icon.addPixmap(QtGui.QPixmap(":/shift_right.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
+        action = QtGui.QAction(icon, "{: <20}\tShift+→".format("Shift channels right"), menu)
         action.triggered.connect(
             partial(
                 self.plot_action,
-                key=QtCore.Qt.Key_Right,
-                modifier=QtCore.Qt.ShiftModifier,
+                key=QtCore.Qt.Key.Key_Right,
+                modifier=QtCore.Qt.KeyboardModifier.ShiftModifier,
             )
         )
         action.setShortcut(QtGui.QKeySequence("Shift+Right"))
         channel_shift_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/shift_up.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
-        action = QtGui.QAction(
-            icon, "{: <20}\tShift+↑".format("Shift channels up"), menu
-        )
+        icon.addPixmap(QtGui.QPixmap(":/shift_up.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
+        action = QtGui.QAction(icon, "{: <20}\tShift+↑".format("Shift channels up"), menu)
         action.triggered.connect(
             partial(
                 self.plot_action,
-                key=QtCore.Qt.Key_Up,
-                modifier=QtCore.Qt.ShiftModifier,
+                key=QtCore.Qt.Key.Key_Up,
+                modifier=QtCore.Qt.KeyboardModifier.ShiftModifier,
             )
         )
         action.setShortcut(QtGui.QKeySequence("Shift+Up"))
         channel_shift_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/shift_down.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
-        action = QtGui.QAction(
-            icon, "{: <20}\tShift+↓".format("Shift channels down"), menu
-        )
+        icon.addPixmap(QtGui.QPixmap(":/shift_down.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
+        action = QtGui.QAction(icon, "{: <20}\tShift+↓".format("Shift channels down"), menu)
         action.triggered.connect(
             partial(
                 self.plot_action,
-                key=QtCore.Qt.Key_Down,
-                modifier=QtCore.Qt.ShiftModifier,
+                key=QtCore.Qt.Key.Key_Down,
+                modifier=QtCore.Qt.KeyboardModifier.ShiftModifier,
             )
         )
         action.setShortcut(QtGui.QKeySequence("Shift+Down"))
@@ -599,8 +538,8 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         action.triggered.connect(
             partial(
                 self.plot_action,
-                key=QtCore.Qt.Key_H,
-                modifier=QtCore.Qt.ControlModifier,
+                key=QtCore.Qt.Key.Key_H,
+                modifier=QtCore.Qt.KeyboardModifier.ControlModifier,
             )
         )
         action.setShortcut(QtGui.QKeySequence("Ctrl+H"))
@@ -610,8 +549,8 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         action.triggered.connect(
             partial(
                 self.plot_action,
-                key=QtCore.Qt.Key_B,
-                modifier=QtCore.Qt.ControlModifier,
+                key=QtCore.Qt.Key.Key_B,
+                modifier=QtCore.Qt.KeyboardModifier.ControlModifier,
             )
         )
         action.setShortcut(QtGui.QKeySequence("Ctrl+B"))
@@ -621,8 +560,8 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         action.triggered.connect(
             partial(
                 self.plot_action,
-                key=QtCore.Qt.Key_P,
-                modifier=QtCore.Qt.ControlModifier,
+                key=QtCore.Qt.Key.Key_P,
+                modifier=QtCore.Qt.KeyboardModifier.ControlModifier,
             )
         )
         action.setShortcut(QtGui.QKeySequence("Ctrl+P"))
@@ -634,18 +573,14 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
 
         action = QtGui.QAction("{: <20}\tAlt+R".format("Raw samples"), menu)
         action.triggered.connect(
-            partial(
-                self.plot_action, key=QtCore.Qt.Key_R, modifier=QtCore.Qt.AltModifier
-            )
+            partial(self.plot_action, key=QtCore.Qt.Key.Key_R, modifier=QtCore.Qt.KeyboardModifier.AltModifier)
         )
         action.setShortcut(QtGui.QKeySequence("Alt+R"))
         samples_format_actions.addAction(action)
 
         action = QtGui.QAction("{: <20}\tAlt+S".format("Scaled samples"), menu)
         action.triggered.connect(
-            partial(
-                self.plot_action, key=QtCore.Qt.Key_S, modifier=QtCore.Qt.AltModifier
-            )
+            partial(self.plot_action, key=QtCore.Qt.Key.Key_S, modifier=QtCore.Qt.KeyboardModifier.AltModifier)
         )
         action.setShortcut(QtGui.QKeySequence("Alt+S"))
         samples_format_actions.addAction(action)
@@ -655,9 +590,9 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         info = QtGui.QActionGroup(self)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/info.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/info.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}\tM".format("Statistics"), menu)
-        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key_M))
+        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key.Key_M))
         action.setShortcut(QtGui.QKeySequence("M"))
         info.addAction(action)
 
@@ -670,32 +605,22 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         action.setShortcut(QtGui.QKeySequence("Shift+C"))
         subs.addAction(action)
 
-        action = QtGui.QAction(
-            "{: <20}\tShift+T".format("Tile sub-windows in a grid"), menu
-        )
+        action = QtGui.QAction("{: <20}\tShift+T".format("Tile sub-windows in a grid"), menu)
         action.triggered.connect(partial(self.show_sub_windows, mode="tile"))
         action.setShortcut(QtGui.QKeySequence("Shift+T"))
         subs.addAction(action)
 
-        action = QtGui.QAction(
-            "{: <20}\tShift+V".format("Tile sub-windows vertically"), menu
-        )
+        action = QtGui.QAction("{: <20}\tShift+V".format("Tile sub-windows vertically"), menu)
         action.triggered.connect(partial(self.show_sub_windows, mode="tile vertically"))
         action.setShortcut(QtGui.QKeySequence("Shift+V"))
         subs.addAction(action)
 
-        action = QtGui.QAction(
-            "{: <20}\tShift+H".format("Tile sub-windows horizontally"), menu
-        )
-        action.triggered.connect(
-            partial(self.show_sub_windows, mode="tile horizontally")
-        )
+        action = QtGui.QAction("{: <20}\tShift+H".format("Tile sub-windows horizontally"), menu)
+        action.triggered.connect(partial(self.show_sub_windows, mode="tile horizontally"))
         action.setShortcut(QtGui.QKeySequence("Shift+H"))
         subs.addAction(action)
 
-        action = QtGui.QAction(
-            "{: <20}\tShift+Alt+F".format("Toggle sub-windows frames"), menu
-        )
+        action = QtGui.QAction("{: <20}\tShift+Alt+F".format("Toggle sub-windows frames"), menu)
         action.triggered.connect(self.toggle_frames)
         action.setShortcut(QtGui.QKeySequence("Shift+Alt+F"))
         subs.addAction(action)
@@ -709,72 +634,58 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         cursors_actions = QtGui.QActionGroup(self)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/cursor.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/cursor.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}\tC".format("Cursor"), menu)
-        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key_C))
-        action.setShortcut(QtCore.Qt.Key_C)
+        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key.Key_C))
+        action.setShortcut(QtCore.Qt.Key.Key_C)
         cursors_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/right.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/right.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}\t←".format("Move cursor left"), menu)
-        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key_Left))
-        action.setShortcut(QtCore.Qt.Key_Left)
+        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key.Key_Left))
+        action.setShortcut(QtCore.Qt.Key.Key_Left)
         cursors_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(QtGui.QPixmap(":/left.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(QtGui.QPixmap(":/left.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}\t→".format("Move cursor right"), menu)
-        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key_Right))
-        action.setShortcut(QtCore.Qt.Key_Right)
+        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key.Key_Right))
+        action.setShortcut(QtCore.Qt.Key.Key_Right)
         cursors_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/range.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/range.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}\tR".format("Range"), menu)
-        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key_R))
-        action.setShortcut(QtCore.Qt.Key_R)
+        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key.Key_R))
+        action.setShortcut(QtCore.Qt.Key.Key_R)
         cursors_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/lock_range.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/lock_range.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}\tY".format("Lock/unlock range"), menu)
-        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key_Y))
-        action.setShortcut(QtCore.Qt.Key_Y)
+        action.triggered.connect(partial(self.plot_action, key=QtCore.Qt.Key.Key_Y))
+        action.setShortcut(QtCore.Qt.Key.Key_Y)
         cursors_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/bookmark.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/bookmark.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}\tCtrl+I".format("Insert bookmark"), menu)
         action.triggered.connect(
             partial(
                 self.plot_action,
-                key=QtCore.Qt.Key_I,
-                modifier=QtCore.Qt.ControlModifier,
+                key=QtCore.Qt.Key.Key_I,
+                modifier=QtCore.Qt.KeyboardModifier.ControlModifier,
             )
         )
         action.setShortcut(QtGui.QKeySequence("Ctrl+I"))
         cursors_actions.addAction(action)
 
         icon = QtGui.QIcon()
-        icon.addPixmap(
-            QtGui.QPixmap(":/bookmark.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-        )
+        icon.addPixmap(QtGui.QPixmap(":/bookmark.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
         action = QtGui.QAction(icon, "{: <20}\tAlt+I".format("Toggle bookmarks"), menu)
         action.triggered.connect(
-            partial(
-                self.plot_action, key=QtCore.Qt.Key_I, modifier=QtCore.Qt.AltModifier
-            )
+            partial(self.plot_action, key=QtCore.Qt.Key.Key_I, modifier=QtCore.Qt.KeyboardModifier.AltModifier)
         )
         action.setShortcut(QtGui.QKeySequence("Alt+I"))
         cursors_actions.addAction(action)
@@ -798,11 +709,23 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         self.menubar.addMenu(self.plot_menu)
 
         menu = self.menubar.addMenu("Help")
+
         open_group = QtGui.QActionGroup(self)
+        action = QtGui.QAction("Dependencies", menu)
+        action.triggered.connect(partial(DependenciesDlg.show_dependencies, "asammdf"))
+        open_group.addAction(action)
         action = QtGui.QAction("Online documentation", menu)
         action.triggered.connect(self.help)
         action.setShortcut(QtGui.QKeySequence("F1"))
         open_group.addAction(action)
+
+        icon = QtGui.QIcon()
+        icon.addPixmap(QtGui.QPixmap(":/info.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
+        action = QtGui.QAction(icon, "About asammdf-gui", menu)
+        action.triggered.connect(self.show_about)
+        open_group.addAction(action)
+        open_group.addAction(action)
+
         menu.addActions(open_group.actions())
 
         self.with_dots = self._settings.value("dots", False, type=bool)
@@ -824,11 +747,6 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         self.show()
         self.fullscreen = None
 
-    def onFileTabChange(self, idx):
-        fileWidget = self.files.widget(idx)
-        if fileWidget:
-            fileWidget.update_all_channel_trees()
-
     def sizeHint(self):
         return QtCore.QSize(1, 1)
 
@@ -843,8 +761,8 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         widget = self.files.currentWidget()
         widget.save_all_subplots()
 
-    def plot_action(self, key, modifier=QtCore.Qt.NoModifier):
-        event = QtGui.QKeyEvent(QtCore.QEvent.KeyPress, key, modifier)
+    def plot_action(self, key, modifier=QtCore.Qt.KeyboardModifier.NoModifier):
+        event = QtGui.QKeyEvent(QtCore.QEvent.Type.KeyPress, key, modifier)
 
         if self.stackedWidget.currentIndex() == 0:
             widget = self.files.currentWidget()
@@ -921,27 +839,19 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
                 self._settings.setValue("show_cursor_circle", action.isChecked())
 
             elif action.text() == "Show horizontal line":
-                self._settings.setValue(
-                    "show_cursor_horizontal_line", action.isChecked()
-                )
+                self._settings.setValue("show_cursor_horizontal_line", action.isChecked())
 
             elif action.text() == "Line width":
-                self._settings.setValue(
-                    "cursor_line_width", action.defaultWidget().currentIndex() + 1
-                )
+                self._settings.setValue("cursor_line_width", action.defaultWidget().currentIndex() + 1)
 
         cursor_circle = self._settings.value("show_cursor_circle", False, type=bool)
-        cursor_horizontal_line = self._settings.value(
-            "show_cursor_horizontal_line", False, type=bool
-        )
+        cursor_horizontal_line = self._settings.value("show_cursor_horizontal_line", False, type=bool)
         cursor_line_width = self._settings.value("cursor_line_width", 1, type=int)
         cursor_color = self._settings.value("cursor_color", "#e69138")
 
         for i in range(self.files.count()):
             file = self.files.widget(i)
-            file.set_cursor_options(
-                cursor_circle, cursor_horizontal_line, cursor_line_width, cursor_color
-            )
+            file.set_cursor_options(cursor_circle, cursor_horizontal_line, cursor_line_width, cursor_color)
 
     def set_subplot_option(self, state):
         if isinstance(state, str):
@@ -1022,152 +932,146 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         else:
             palette = QtGui.QPalette()
             brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.WindowText, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.WindowText, brush)
             brush = QtGui.QBrush(QtGui.QColor(55, 55, 55))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Button, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.Button, brush)
             brush = QtGui.QBrush(QtGui.QColor(82, 82, 82))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Light, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.Light, brush)
             brush = QtGui.QBrush(QtGui.QColor(68, 68, 68))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Midlight, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.Midlight, brush)
             brush = QtGui.QBrush(QtGui.QColor(27, 27, 27))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Dark, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.Dark, brush)
             brush = QtGui.QBrush(QtGui.QColor(36, 36, 36))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Mid, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.Mid, brush)
             brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Text, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.Text, brush)
             brush = QtGui.QBrush(QtGui.QColor(100, 100, 100))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(
-                QtGui.QPalette.Active, QtGui.QPalette.PlaceholderText, brush
-            )
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.PlaceholderText, brush)
             brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.BrightText, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.BrightText, brush)
             brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.ButtonText, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.ButtonText, brush)
             brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Base, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.Base, brush)
             brush = QtGui.QBrush(QtGui.QColor(55, 55, 55))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Window, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.Window, brush)
             brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.Shadow, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.Shadow, brush)
             brush = QtGui.QBrush(QtGui.QColor(27, 27, 27))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.AlternateBase, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.AlternateBase, brush)
             brush = QtGui.QBrush(QtGui.QColor(255, 255, 220))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.ToolTipBase, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.ToolTipBase, brush)
             brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Active, QtGui.QPalette.ToolTipText, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.ToolTipText, brush)
             brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.WindowText, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.WindowText, brush)
             brush = QtGui.QBrush(QtGui.QColor(55, 55, 55))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Button, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.Button, brush)
             brush = QtGui.QBrush(QtGui.QColor(82, 82, 82))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Light, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.Light, brush)
             brush = QtGui.QBrush(QtGui.QColor(68, 68, 68))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Midlight, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.Midlight, brush)
             brush = QtGui.QBrush(QtGui.QColor(27, 27, 27))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Dark, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.Dark, brush)
             brush = QtGui.QBrush(QtGui.QColor(36, 36, 36))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Mid, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.Mid, brush)
             brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Text, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.Text, brush)
             brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.BrightText, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.BrightText, brush)
             brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.ButtonText, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.ButtonText, brush)
             brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Base, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.Base, brush)
             brush = QtGui.QBrush(QtGui.QColor(55, 55, 55))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Window, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.Window, brush)
             brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Shadow, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.Shadow, brush)
             brush = QtGui.QBrush(QtGui.QColor(27, 27, 27))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(
-                QtGui.QPalette.Inactive, QtGui.QPalette.AlternateBase, brush
-            )
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.AlternateBase, brush)
             brush = QtGui.QBrush(QtGui.QColor(255, 255, 220))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.ToolTipBase, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.ToolTipBase, brush)
             brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.ToolTipText, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.ToolTipText, brush)
             brush = QtGui.QBrush(QtGui.QColor(27, 27, 27))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.WindowText, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.WindowText, brush)
             brush = QtGui.QBrush(QtGui.QColor(55, 55, 55))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Button, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Button, brush)
             brush = QtGui.QBrush(QtGui.QColor(82, 82, 82))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Light, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Light, brush)
             brush = QtGui.QBrush(QtGui.QColor(68, 68, 68))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Midlight, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Midlight, brush)
             brush = QtGui.QBrush(QtGui.QColor(27, 27, 27))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Dark, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Dark, brush)
             brush = QtGui.QBrush(QtGui.QColor(36, 36, 36))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Mid, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Mid, brush)
             brush = QtGui.QBrush(QtGui.QColor(27, 27, 27))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Text, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Text, brush)
             brush = QtGui.QBrush(QtGui.QColor(255, 255, 255))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.BrightText, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.BrightText, brush)
             brush = QtGui.QBrush(QtGui.QColor(27, 27, 27))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.ButtonText, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.ButtonText, brush)
             brush = QtGui.QBrush(QtGui.QColor(55, 55, 55))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Base, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Base, brush)
             brush = QtGui.QBrush(QtGui.QColor(55, 55, 55))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Window, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Window, brush)
             brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.Shadow, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Shadow, brush)
             brush = QtGui.QBrush(QtGui.QColor(55, 55, 55))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(
-                QtGui.QPalette.Disabled, QtGui.QPalette.AlternateBase, brush
-            )
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.AlternateBase, brush)
             brush = QtGui.QBrush(QtGui.QColor(255, 255, 220))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.ToolTipBase, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.ToolTipBase, brush)
             brush = QtGui.QBrush(QtGui.QColor(0, 0, 0))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Disabled, QtGui.QPalette.ToolTipText, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.ToolTipText, brush)
             brush = QtGui.QBrush(QtGui.QColor(100, 100, 100))
-            brush.setStyle(QtCore.Qt.SolidPattern)
-            palette.setBrush(QtGui.QPalette.Inactive, QtGui.QPalette.Highlight, brush)
+            brush.setStyle(QtCore.Qt.BrushStyle.SolidPattern)
+            palette.setBrush(QtGui.QPalette.ColorGroup.Inactive, QtGui.QPalette.ColorRole.Highlight, brush)
             app.setPalette(palette)
 
     def set_line_interconnect(self, option):
@@ -1232,9 +1136,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
             count = self.batch.files_list.count()
 
             icon = QtGui.QIcon()
-            icon.addPixmap(
-                QtGui.QPixmap(":/file.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-            )
+            icon.addPixmap(QtGui.QPixmap(":/file.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
 
             for row in range(count):
                 self.batch.files_list.item(row).setIcon(icon)
@@ -1288,7 +1190,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
                 self._settings.value("last_opened_path", "", str),
                 "CSV (*.csv);;MDF v3 (*.dat *.mdf);;MDF v4(*.mf4 *.mf4z);;DL3/ERG files (*.dl3 *.erg);;All files (*.csv *.dat *.mdf *.mf4 *.mf4z *.dl3 *.erg)",
                 "All files (*.csv *.dat *.mdf *.mf4 *.mf4z *.dl3 *.erg)",
-                options=QtWidgets.QFileDialog.DontUseNativeDialog,
+                options=QtWidgets.QFileDialog.Option.DontUseNativeDialog,
             )
         else:
             file_names, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -1311,8 +1213,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
             self,
             "Select folder",
             "",
-            QtWidgets.QFileDialog.ShowDirsOnly
-            | QtWidgets.QFileDialog.DontResolveSymlinks,
+            QtWidgets.QFileDialog.Option.ShowDirsOnly | QtWidgets.QFileDialog.Option.DontResolveSymlinks,
         )
         if not folder:
             return
@@ -1322,30 +1223,29 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         if self.stackedWidget.currentIndex() == 0:
             for root, dirs, files in os.walk(folder):
                 for file in natsorted(files):
-                    if file.lower().endswith(
-                        (".csv", ".erg", ".dl3", ".dat", ".mdf", ".mf4", ".mf4z")
-                    ):
+                    if file.lower().endswith((".csv", ".erg", ".dl3", ".dat", ".mdf", ".mf4", ".mf4z")):
                         self._open_file(os.path.join(root, file))
         else:
             icon = QtGui.QIcon()
-            icon.addPixmap(
-                QtGui.QPixmap(":/file.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-            )
+            icon.addPixmap(QtGui.QPixmap(":/file.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
+
+            self.batch._ignore = True
 
             for root, dirs, files in os.walk(folder):
                 for file in natsorted(files):
-                    if file.lower().endswith(
-                        (".csv", ".erg", ".dl3", ".dat", ".mdf", ".mf4", ".mf4z")
-                    ):
-                        row = self.batch.files_list.count()
-                        self.batch.files_list.addItem(os.path.join(root, file))
-                        self.batch.files_list.item(row).setIcon(icon)
+                    if file.lower().endswith((".csv", ".erg", ".dl3", ".dat", ".mdf", ".mf4", ".mf4z")):
+                        item = QtWidgets.QListWidgetItem(icon, os.path.join(root, file))
+                        self.batch.files_list.addItem(item)
+
+            self.batch._ignore = False
+            self.batch.update_channel_tree()
 
     def close_file(self, index):
         widget = self.files.widget(index)
         if widget:
             widget.close()
             widget.setParent(None)
+            widget.deleteLater()
 
         if self.files.count():
             self.files.setCurrentIndex(0)
@@ -1354,6 +1254,10 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         count = self.files.count()
         for i in range(count):
             self.files.widget(i).close()
+        if self.fullscreen:
+            widget, index = self.fullscreen
+            widget.close()
+            widget.deleteLater()
         event.accept()
 
     def dragEnterEvent(self, e):
@@ -1376,9 +1280,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
                         self._open_file(path)
             else:
                 icon = QtGui.QIcon()
-                icon.addPixmap(
-                    QtGui.QPixmap(":/file.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off
-                )
+                icon.addPixmap(QtGui.QPixmap(":/file.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
 
                 for path in e.mimeData().text().splitlines():
                     path = Path(path.replace(r"file:///", ""))
@@ -1400,35 +1302,26 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
     def mode_changed(self, index):
         if index == 0:
             self.plot_menu.setEnabled(True)
-            self.setWindowTitle(
-                f"asammdf {libversion} [PID={os.getpid()}] - Single files"
-            )
+            self.setWindowTitle(f"asammdf {libversion} [PID={os.getpid()}] - Single files")
         elif index == 1:
             self.plot_menu.setEnabled(False)
-            self.setWindowTitle(
-                f"asammdf {libversion} [PID={os.getpid()}] - Batch processing"
-            )
+            self.setWindowTitle(f"asammdf {libversion} [PID={os.getpid()}] - Batch processing")
         elif index == 2:
             self.plot_menu.setEnabled(True)
-            self.setWindowTitle(
-                f"asammdf {libversion} [PID={os.getpid()}] - Comparison"
-            )
+            self.setWindowTitle(f"asammdf {libversion} [PID={os.getpid()}] - Comparison")
 
     def keyPressEvent(self, event):
         key = event.key()
         modifier = event.modifiers()
 
-        if key == QtCore.Qt.Key_F and modifier == QtCore.Qt.ControlModifier:
+        if key == QtCore.Qt.Key.Key_F and modifier == QtCore.Qt.KeyboardModifier.ControlModifier:
             if self.files.count() and self.stackedWidget.currentIndex() == 0:
                 self.files.currentWidget().keyPressEvent(event)
             elif self.files.count() and self.stackedWidget.currentIndex() == 2:
+                event.accept()
                 count = self.files.count()
-                channels_dbs = [
-                    self.files.widget(i).mdf.channels_db for i in range(count)
-                ]
-                measurements = [
-                    str(self.files.widget(i).mdf.name) for i in range(count)
-                ]
+                channels_dbs = [self.files.widget(i).mdf.channels_db for i in range(count)]
+                measurements = [str(self.files.widget(i).mdf.name) for i in range(count)]
 
                 dlg = MultiSearch(channels_dbs, measurements, parent=self)
                 dlg.setModal(True)
@@ -1468,25 +1361,27 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
                             )
                         self.add_window((ret, names))
 
-        elif key == QtCore.Qt.Key_F11:
+        elif key == QtCore.Qt.Key.Key_F11:
             self.toggle_fullscreen()
+            event.accept()
 
-        elif key in (QtCore.Qt.Key_F2, QtCore.Qt.Key_F3, QtCore.Qt.Key_F4):
+        elif key in (QtCore.Qt.Key.Key_F2, QtCore.Qt.Key.Key_F3, QtCore.Qt.Key.Key_F4):
             if self.files.count() and self.stackedWidget.currentIndex() == 0:
-                if key == QtCore.Qt.Key_F2:
+                if key == QtCore.Qt.Key.Key_F2:
                     window_type = "Plot"
-                elif key == QtCore.Qt.Key_F3:
+                elif key == QtCore.Qt.Key.Key_F3:
                     window_type = "Numeric"
-                elif key == QtCore.Qt.Key_F4:
+                elif key == QtCore.Qt.Key.Key_F4:
                     window_type = "Tabular"
                 self.files.currentWidget()._create_window(None, window_type)
+            event.accept()
 
         else:
             super().keyPressEvent(event)
 
     def comparison_search(self, event):
         event = QtGui.QKeyEvent(
-            QtCore.QEvent.KeyPress, QtCore.Qt.Key_F, QtCore.Qt.ControlModifier
+            QtCore.QEvent.Type.KeyPress, QtCore.Qt.Key.Key_F, QtCore.Qt.KeyboardModifier.ControlModifier
         )
         self.keyPressEvent(event)
 
@@ -1498,9 +1393,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         for i, name in enumerate(measurements, 1):
             info.extend(wrap(f"{i:> 2}: {name}", 120))
 
-        QtWidgets.QMessageBox.information(
-            self, "Measurement files used for comparison", "\n".join(info)
-        )
+        MessageBox.information(self, "Measurement files used for comparison", "\n".join(info))
 
     def toggle_fullscreen(self):
         if self.files.count() > 0 or self.fullscreen is not None:
@@ -1541,7 +1434,7 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
         if self.stackedWidget.currentIndex() == 0:
             widget = self.files.currentWidget()
             event = QtGui.QKeyEvent(
-                QtCore.QEvent.KeyPress, QtCore.Qt.Key_L, QtCore.Qt.ShiftModifier
+                QtCore.QEvent.Type.KeyPress, QtCore.Qt.Key.Key_L, QtCore.Qt.KeyboardModifier.ShiftModifier
             )
             if widget:
                 widget.keyPressEvent(event)
@@ -1587,3 +1480,27 @@ class MainWindow(WithMDIArea, Ui_PyMDFMainWindow, QtWidgets.QMainWindow):
 
         if dlg.pressed_button == "apply":
             dlg.store()
+
+    def show_about(self):
+        bits = "x86" if sys.maxsize < 2**32 else "x64"
+        cpython = ".".join(str(e) for e in sys.version_info[:3])
+        cpython = f"{cpython} {bits}"
+
+        MessageBox.about(
+            self,
+            "About asammdf-gui",
+            f"""Graphical user interface for the asammdf package
+
+* * *
+
+Build information:
+
+*   version {libversion}
+*   PySide6 {pyside6_version}
+*   CPython {cpython}
+
+  
+
+Copyright © 2018-2023 Daniel Hrisca""",
+            markdown=True,
+        )

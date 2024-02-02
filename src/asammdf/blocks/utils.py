@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 asammdf utility functions and classes
 """
@@ -6,8 +5,10 @@ asammdf utility functions and classes
 from __future__ import annotations
 
 from collections.abc import Iterator
+from copy import deepcopy
 from functools import lru_cache
 from io import StringIO
+import json
 import logging
 from pathlib import Path
 from random import randint
@@ -17,13 +18,50 @@ from struct import Struct
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+from time import perf_counter
+from traceback import format_exc
 from typing import Any, Dict, overload, Tuple
 import xml.etree.ElementTree as ET
 
+import lxml
 from typing_extensions import Literal, TypedDict
 
 TERMINATED = object()
+COMPARISON_NAME = re.compile(r"(\s*\d+:)?(?P<name>.+)")
+C_FUNCTION = re.compile(r"\s+(?P<function>\S+)\s*\(\s*struct\s+DATA\s+\*data\s*\)")
 target_byte_order = "<=" if sys.byteorder == "little" else ">="
+
+COLORS = [
+    "#1f77b4",
+    "#ff7f0e",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#7f7f7f",
+    "#bcbd22",
+    "#17becf",
+]
+COLORS_COUNT = len(COLORS)
+
+try:
+    from pyqtgraph import functions as fn
+except ImportError:
+
+    class fn:
+        @classmethod
+        def mkColor(cls, color):
+            return color
+
+        @classmethod
+        def mkPen(cls, color):
+            return color
+
+        @classmethod
+        def mkBrush(cls, color):
+            return color
+
 
 try:
     from cchardet import detect
@@ -54,8 +92,6 @@ from numpy import arange, bool_, dtype, interp, where
 from numpy.typing import NDArray
 from pandas import Series
 
-from . import v2_v3_constants as v3c
-from . import v4_constants as v4c
 from ..types import (
     ChannelType,
     DataGroupType,
@@ -64,6 +100,8 @@ from ..types import (
     ReadableBufferType,
     StrPathType,
 )
+from . import v2_v3_constants as v3c
+from . import v4_constants as v4c
 
 UINT8_u = Struct("<B").unpack
 UINT16_u = Struct("<H").unpack
@@ -81,7 +119,7 @@ TWO_UINT64_uf = Struct("<2Q").unpack_from
 BLK_COMMON_uf = Struct("<4s4xQ").unpack_from
 BLK_COMMON_u = Struct("<4s4xQ8x").unpack
 
-EMPTY_TUPLE = tuple()
+EMPTY_TUPLE = ()
 
 _xmlns_pattern = re.compile(' xmlns="[^"]*"')
 
@@ -131,7 +169,8 @@ ALLOWED_MATLAB_CHARS = set(string.ascii_letters + string.digits + "_")
 class MdfException(Exception):
     """MDF Exception class"""
 
-    pass
+    def __repr__(self):
+        return f"asammdf MdfException: {self.args[0]}"
 
 
 def extract_xml_comment(comment: str) -> str:
@@ -203,8 +242,7 @@ def get_text_v3(
     stream: ReadableBufferType,
     mapped: bool = ...,
     decode: Literal[True] = ...,
-) -> str:
-    ...
+) -> str: ...
 
 
 @overload
@@ -213,13 +251,10 @@ def get_text_v3(
     stream: ReadableBufferType,
     mapped: bool = ...,
     decode: Literal[False] = ...,
-) -> bytes:
-    ...
+) -> bytes: ...
 
 
-def get_text_v3(
-    address: int, stream: ReadableBufferType, mapped: bool = False, decode: bool = True
-) -> str | bytes:
+def get_text_v3(address: int, stream: ReadableBufferType, mapped: bool = False, decode: bool = True) -> str | bytes:
     """faster way to extract strings from mdf versions 2 and 3 TextBlock
 
     Parameters
@@ -244,9 +279,7 @@ def get_text_v3(
         if block_id != b"TX":
             return "" if decode else b""
         (size,) = UINT16_uf(stream, address + 2)
-        text_bytes = (
-            stream[address + 4 : address + size].split(b"\0", 1)[0].strip(b" \r\t\n")
-        )
+        text_bytes = stream[address + 4 : address + size].split(b"\0", 1)[0].strip(b" \r\t\n")
     else:
         stream.seek(address)
         block_id = stream.read(2)
@@ -275,8 +308,7 @@ def get_text_v4(
     stream: ReadableBufferType,
     mapped: bool = ...,
     decode: Literal[True] = ...,
-) -> str:
-    ...
+) -> str: ...
 
 
 @overload
@@ -285,13 +317,10 @@ def get_text_v4(
     stream: ReadableBufferType,
     mapped: bool = ...,
     decode: Literal[False] = ...,
-) -> bytes:
-    ...
+) -> bytes: ...
 
 
-def get_text_v4(
-    address: int, stream: ReadableBufferType, mapped: bool = False, decode: bool = True
-) -> str | bytes:
+def get_text_v4(address: int, stream: ReadableBufferType, mapped: bool = False, decode: bool = True) -> str | bytes:
     """faster way to extract strings from mdf version 4 TextBlock
 
     Parameters
@@ -315,9 +344,7 @@ def get_text_v4(
         block_id, size = BLK_COMMON_uf(stream, address)
         if block_id not in (b"##TX", b"##MD"):
             return "" if decode else b""
-        text_bytes = (
-            stream[address + 24 : address + size].split(b"\0", 1)[0].strip(b" \r\t\n")
-        )
+        text_bytes = stream[address + 24 : address + size].split(b"\0", 1)[0].strip(b" \r\t\n")
     else:
         stream.seek(address)
         block_id, size = BLK_COMMON_u(stream.read(24))
@@ -403,9 +430,7 @@ def extract_ev_tool(comment: str) -> str:
 
 
 @lru_cache(maxsize=1024)
-def get_fmt_v3(
-    data_type: int, size: int, byte_order: int = v3c.BYTE_ORDER_INTEL
-) -> str:
+def get_fmt_v3(data_type: int, size: int, byte_order: int = v3c.BYTE_ORDER_INTEL) -> str:
     """convert mdf versions 2 and 3 channel data type to numpy dtype format
     string
 
@@ -432,6 +457,9 @@ def get_fmt_v3(
             v3c.DATA_TYPE_UNSIGNED_INTEL,
             v3c.DATA_TYPE_UNSIGNED,
             v3c.DATA_TYPE_UNSIGNED_MOTOROLA,
+            v3c.DATA_TYPE_SIGNED_INTEL,
+            v3c.DATA_TYPE_SIGNED,
+            v3c.DATA_TYPE_SIGNED_MOTOROLA,
         ):
             fmt = f"({size // 8},)u1"
         else:
@@ -489,9 +517,7 @@ def get_fmt_v3(
 
 
 @lru_cache(maxsize=1024)
-def get_fmt_v4(
-    data_type: int, size: int, channel_type: int = v4c.CHANNEL_TYPE_VALUE
-) -> str:
+def get_fmt_v4(data_type: int, size: int, channel_type: int = v4c.CHANNEL_TYPE_VALUE) -> str:
     """convert mdf version 4 channel data type to numpy dtype format string
 
     Parameters
@@ -561,6 +587,8 @@ def get_fmt_v4(
         if size > 64 and data_type in (
             v4c.DATA_TYPE_UNSIGNED_INTEL,
             v4c.DATA_TYPE_UNSIGNED_MOTOROLA,
+            v4c.DATA_TYPE_SIGNED_INTEL,
+            v4c.DATA_TYPE_SIGNED_MOTOROLA,
         ):
             fmt = f"({size // 8},)u1"
         else:
@@ -601,9 +629,7 @@ def get_fmt_v4(
 
 
 @lru_cache(maxsize=1024)
-def fmt_to_datatype_v3(
-    fmt: dtype[Any], shape: tuple[int, ...], array: bool = False
-) -> tuple[int, int]:
+def fmt_to_datatype_v3(fmt: dtype[Any], shape: tuple[int, ...], array: bool = False) -> tuple[int, int]:
     """convert numpy dtype format string to mdf versions 2 and 3
     channel data type and size
 
@@ -634,17 +660,17 @@ def fmt_to_datatype_v3(
             size *= dim
     else:
         if kind == "u":
-            if byteorder in "<":
+            if byteorder == "<":
                 data_type = v3c.DATA_TYPE_UNSIGNED_INTEL
             else:
                 data_type = v3c.DATA_TYPE_UNSIGNED_MOTOROLA
         elif kind == "i":
-            if byteorder in "<":
+            if byteorder == "<":
                 data_type = v3c.DATA_TYPE_SIGNED_INTEL
             else:
                 data_type = v3c.DATA_TYPE_SIGNED_MOTOROLA
         elif kind == "f":
-            if byteorder in "<":
+            if byteorder == "<":
                 if size == 32:
                     data_type = v3c.DATA_TYPE_FLOAT
                 else:
@@ -700,9 +726,7 @@ def info_to_datatype_v4(signed: bool, little_endian: bool) -> int:
 
 
 @lru_cache(maxsize=1024)
-def fmt_to_datatype_v4(
-    fmt: dtype[Any], shape: tuple[int, ...], array: bool = False
-) -> tuple[int, int]:
+def fmt_to_datatype_v4(fmt: dtype[Any], shape: tuple[int, ...], array: bool = False) -> tuple[int, int]:
     """convert numpy dtype format string to mdf version 4 channel data
     type and size
 
@@ -766,9 +790,7 @@ def fmt_to_datatype_v4(
     return data_type, size
 
 
-def as_non_byte_sized_signed_int(
-    integer_array: NDArray[Any], bit_length: int
-) -> NDArray[Any]:
+def as_non_byte_sized_signed_int(integer_array: NDArray[Any], bit_length: int) -> NDArray[Any]:
     """
     The MDF spec allows values to be encoded as integers that aren't
     byte-sized. Numpy only knows how to do two's complement on byte-sized
@@ -794,14 +816,10 @@ def as_non_byte_sized_signed_int(
         integer_array &= (1 << bit_length) - 1  # Zero out the unwanted bits
         truncated_integers = integer_array
     else:
-        truncated_integers = integer_array & (
-            (1 << bit_length) - 1
-        )  # Zero out the unwanted bits
+        truncated_integers = integer_array & ((1 << bit_length) - 1)  # Zero out the unwanted bits
     return where(
-        truncated_integers
-        >> bit_length - 1,  # sign bit as a truth series (True when negative)
-        (2**bit_length - truncated_integers)
-        * -1,  # when negative, do two's complement
+        truncated_integers >> bit_length - 1,  # sign bit as a truth series (True when negative)
+        (2**bit_length - truncated_integers) * -1,  # when negative, do two's complement
         truncated_integers,  # when positive, return the truncated int
     )
 
@@ -908,21 +926,15 @@ def count_channel_groups(
                             ch_count += 1
                             ch_addr = UINT64_uf(stream, ch_addr + 24)[0]
                             if ch_addr >= file_limit:
-                                raise MdfException(
-                                    f"File is a corrupted MDF file - Invalid CH block address"
-                                )
+                                raise MdfException("File is a corrupted MDF file - Invalid CH block address")
 
                     cg_addr = UINT64_uf(stream, cg_addr + 24)[0]
                     if cg_addr >= file_limit:
-                        raise MdfException(
-                            f"File is a corrupted MDF file - Invalid CG block address"
-                        )
+                        raise MdfException("File is a corrupted MDF file - Invalid CG block address")
 
                 dg_addr = UINT64_uf(stream, dg_addr + 24)[0]
                 if dg_addr >= file_limit:
-                    raise MdfException(
-                        f"File is a corrupted MDF file - Invalid DG block address"
-                    )
+                    raise MdfException("File is a corrupted MDF file - Invalid DG block address")
         else:
             stream.seek(88, 0)
             dg_addr = UINT64_u(stream.read(8))[0]
@@ -939,24 +951,18 @@ def count_channel_groups(
                             stream.seek(ch_addr + 24)
                             ch_addr = UINT64_u(stream.read(8))[0]
                             if ch_addr >= file_limit:
-                                raise MdfException(
-                                    f"File is a corrupted MDF file - Invalid CH block address"
-                                )
+                                raise MdfException("File is a corrupted MDF file - Invalid CH block address")
 
                     stream.seek(cg_addr + 24)
                     cg_addr = UINT64_u(stream.read(8))[0]
                     if cg_addr >= file_limit:
-                        raise MdfException(
-                            f"File is a corrupted MDF file - Invalid CG block address"
-                        )
+                        raise MdfException("File is a corrupted MDF file - Invalid CG block address")
 
                 stream.seek(dg_addr + 24)
                 dg_addr = UINT64_u(stream.read(8))[0]
 
                 if dg_addr >= file_limit:
-                    raise MdfException(
-                        f"File is a corrupted MDF file - Invalid DG block address"
-                    )
+                    raise MdfException("File is a corrupted MDF file - Invalid DG block address")
 
     else:
         stream.seek(68, 0)
@@ -974,24 +980,18 @@ def count_channel_groups(
                         stream.seek(ch_addr + 4)
                         ch_addr = UINT32_u(stream.read(4))[0]
                         if ch_addr >= file_limit:
-                            raise MdfException(
-                                f"File is a corrupted MDF file - Invalid CH block address"
-                            )
+                            raise MdfException("File is a corrupted MDF file - Invalid CH block address")
 
                 stream.seek(cg_addr + 4)
                 cg_addr = UINT32_u(stream.read(4))[0]
                 if cg_addr >= file_limit:
-                    raise MdfException(
-                        f"File is a corrupted MDF file - Invalid CG block address"
-                    )
+                    raise MdfException("File is a corrupted MDF file - Invalid CG block address")
 
             stream.seek(dg_addr + 4)
             dg_addr = UINT32_u(stream.read(4))[0]
 
             if dg_addr >= file_limit:
-                raise MdfException(
-                    f"File is a corrupted MDF file - Invalid DG block address"
-                )
+                raise MdfException("File is a corrupted MDF file - Invalid DG block address")
 
     return count, ch_count
 
@@ -1020,11 +1020,7 @@ def validate_version_argument(version: str, hint: int = 4) -> str:
             valid_version = "3.30"
         else:
             valid_version = "4.10"
-        message = (
-            'Unknown mdf version "{}".'
-            " The available versions are {};"
-            ' automatically using version "{}"'
-        )
+        message = 'Unknown mdf version "{}".' " The available versions are {};" ' automatically using version "{}"'
         message = message.format(version, SUPPORTED_VERSIONS, valid_version)
         logger.warning(message)
     else:
@@ -1117,7 +1113,7 @@ def is_file_like(obj: object) -> bool:
     return True
 
 
-class UniqueDB(object):
+class UniqueDB:
     def __init__(self) -> None:
         self._db = {}
 
@@ -1184,6 +1180,7 @@ def cut_video_stream(stream: bytes, start: float, end: float, fmt: str) -> bytes
                     f"{out_file}",
                 ],
                 capture_output=True,
+                check=False,
             )
         except FileNotFoundError:
             result = stream
@@ -1214,6 +1211,7 @@ def get_video_stream_duration(stream: bytes) -> float | None:
                     f"{in_file}",
                 ],
                 capture_output=True,
+                check=False,
             )
             result = float(result.stdout)
         except FileNotFoundError:
@@ -1277,8 +1275,7 @@ class Group:
         self.data_blocks_info_generator = None
 
     def get_data_blocks(self) -> Iterator[DataBlockInfo]:
-        for blk in self.data_blocks:
-            yield blk
+        yield from self.data_blocks
 
         while True:
             try:
@@ -1292,8 +1289,7 @@ class Group:
         signal_data = self.signal_data[index]
         if signal_data is not None:
             signal_data, signal_generator = signal_data
-            for blk in signal_data:
-                yield blk
+            yield from signal_data
 
             while True:
                 try:
@@ -1389,7 +1385,7 @@ def components(
 
         values = channel[name]
         if values.dtype.byteorder not in target_byte_order:
-            values = values.byteswap().newbyteorder()
+            values = values.byteswap().view(values.dtype.newbyteorder())
 
         if len(values.shape) > 1:
             values = Series(
@@ -1408,7 +1404,7 @@ def components(
             values = channel[name]
 
             if values.dtype.byteorder not in target_byte_order:
-                values = values.byteswap().newbyteorder()
+                values = values.byteswap().view(values.dtype.newbyteorder())
 
             if not only_basenames:
                 axis_name = unique_names.get_unique_name(f"{name_}.{name}")
@@ -1444,13 +1440,11 @@ def components(
 
             else:
                 if values.dtype.byteorder not in target_byte_order:
-                    values = values.byteswap().newbyteorder()
+                    values = values.byteswap().view(values.dtype.newbyteorder())
 
                 if not only_basenames:
                     name_ = unique_names.get_unique_name(
-                        f"{prefix}.{channel_name}.{name}"
-                        if prefix
-                        else f"{channel_name}.{name}"
+                        f"{prefix}.{channel_name}.{name}" if prefix else f"{channel_name}.{name}"
                     )
                 else:
                     name_ = unique_names.get_unique_name(name)
@@ -1522,9 +1516,7 @@ class InvalidationBlockInfo(DataBlockInfo):
         all_valid: bool = False,
         block_limit: int | None = None,
     ) -> None:
-        super().__init__(
-            address, block_type, original_size, compressed_size, param, block_limit
-        )
+        super().__init__(address, block_type, original_size, compressed_size, param, block_limit)
         self.all_valid = all_valid
 
     def __repr__(self) -> str:
@@ -1618,9 +1610,7 @@ def downcast(array: NDArray[Any]) -> NDArray[Any]:
     return array
 
 
-def master_using_raster(
-    mdf: MDF_v2_v3_v4, raster: RasterType, endpoint: bool = False
-) -> NDArray[Any]:
+def master_using_raster(mdf: MDF_v2_v3_v4, raster: RasterType, endpoint: bool = False) -> NDArray[Any]:
     """get single master based on the raster
 
     Parameters
@@ -1647,14 +1637,10 @@ def master_using_raster(
             group = mdf.groups[group_index]
             cycles_nr = group.channel_group.cycles_nr
             if cycles_nr:
-                master_min = mdf.get_master(
-                    group_index, record_offset=0, record_count=1
-                )
+                master_min = mdf.get_master(group_index, record_offset=0, record_count=1)
                 if len(master_min):
                     t_min.append(master_min[0])
-                master_max = mdf.get_master(
-                    group_index, record_offset=cycles_nr - 1, record_count=1
-                )
+                master_max = mdf.get_master(group_index, record_offset=cycles_nr - 1, record_count=1)
                 if len(master_max):
                     t_max.append(master_max[0])
 
@@ -1662,8 +1648,8 @@ def master_using_raster(
             t_min = np.amin(t_min)
             t_max = np.amax(t_max)
 
-            num = float(np.float32((t_max - t_min) / raster))
-            if int(num) == num:
+            num = float(np.float64((t_max - t_min) / raster))
+            if num.is_integer():
                 master = np.linspace(t_min, t_max, int(num) + 1)
             else:
                 master = np.arange(t_min, t_max, raster)
@@ -1702,37 +1688,18 @@ def csv_int2hex(val) -> str:
 csv_int2hex = np.vectorize(csv_int2hex, otypes=[str])
 
 
-if sys.version_info.major >= 3 and sys.version_info.minor >= 8:
+def csv_bytearray2hex(val, size: int | None = None) -> str:
+    """format CAN payload as hex strings
 
-    def csv_bytearray2hex(val, size: int | None = None) -> str:
-        """format CAN payload as hex strings
+    b'\xa2\xc3\x08' -> A2 C3 08
 
-        b'\xa2\xc3\x08' -> A2 C3 08
+    """
+    if size is not None:
+        val = val.tobytes()[:size].hex(" ", 1).upper()
+    else:
+        val = val.tobytes().hex(" ", 1).upper()
 
-        """
-        if size is not None:
-            val = val.tobytes()[:size].hex(" ", 1).upper()
-        else:
-            val = val.tobytes().hex(" ", 1).upper()
-
-        return val
-
-else:
-
-    def csv_bytearray2hex(val, size: int | None = None) -> str:
-        """format CAN payload as hex strings
-
-        b'\xa2\xc3\x08' -> A2 C3 08
-
-        """
-        if size is not None:
-            val = val.tobytes()[:size].hex().upper()
-        else:
-            val = val.tobytes().hex().upper()
-
-        vals = [val[i : i + 2] for i in range(0, len(val), 2)]
-
-        return " ".join(vals)
+    return val
 
 
 csv_bytearray2hex = np.vectorize(csv_bytearray2hex, otypes=[str])
@@ -1755,9 +1722,7 @@ def pandas_query_compatible(name: str) -> str:
     return name
 
 
-def load_can_database(
-    path: StrPathType, contents: bytes | str | None = None, **kwargs
-) -> CanMatrix | None:
+def load_can_database(path: StrPathType, contents: bytes | str | None = None, **kwargs) -> CanMatrix | None:
     """
 
 
@@ -1905,9 +1870,9 @@ def plausible_timestamps(
     """
 
     exps = np.log10(t)
-    idx = (~np.isnan(t)) & (~np.isinf(t)) & (t >= minimum) & (t <= maximum) & (
-        t == 0
-    ) | ((exps >= exp_min) & (exps <= exp_max))
+    idx = (~np.isnan(t)) & (~np.isinf(t)) & (t >= minimum) & (t <= maximum) & (t == 0) | (
+        (exps >= exp_min) & (exps <= exp_max)
+    )
     if not np.all(idx):
         all_ok = False
         return all_ok, idx
@@ -1929,3 +1894,509 @@ table = str.maketrans(
 
 def escape_xml_string(string: str) -> str:
     return string.translate(table)
+
+
+def extract_mime_names(data, disable_new_channels=None):
+    def fix_comparison_name(data, disable_new_channels=None):
+        for item in data:
+            if item["type"] == "channel":
+                if disable_new_channels is not None:
+                    item["enabled"] = not disable_new_channels
+
+                if (item["group_index"], item["channel_index"]) != (-1, -1):
+                    name = COMPARISON_NAME.match(item["name"]).group("name").strip()
+                    item["name"] = name
+            else:
+                if disable_new_channels is not None:
+                    item["enabled"] = not disable_new_channels
+                fix_comparison_name(item["channels"], disable_new_channels=disable_new_channels)
+
+    names = []
+    if data.hasFormat("application/octet-stream-asammdf"):
+        data = bytes(data.data("application/octet-stream-asammdf")).decode("utf-8")
+        data = json.loads(data)
+        fix_comparison_name(data, disable_new_channels=disable_new_channels)
+        names = data
+
+    return names
+
+
+def set_mime_enable(mime, enable):
+    for item in mime:
+        if item["type"] == "channel":
+            item["enabled"] = enable
+        else:
+            set_mime_enable(item["channels"], enable)
+
+
+def load_dsp(file, background="#000000", flat=False):
+    if isinstance(background, str):
+        background = fn.mkColor(background)
+
+    def parse_conversions(display):
+        conversions = {}
+
+        if display is None:
+            return conversions
+
+        for item in display.findall("COMPU_METHOD"):
+            try:
+                conv = {
+                    "name": item.get("name"),
+                    "comment": item.get("description"),
+                    "unit": item.get("unit"),
+                }
+
+                conversion_type = int(item.get("cnv_type"))
+                if conversion_type == 0:
+                    conv["conversion_type"] = v4c.CONVERSION_TYPE_LIN
+
+                    coeffs = item.find("COEFFS_LINIAR")
+
+                    conv["a"] = float(coeffs.get("P1"))
+                    conv["b"] = float(coeffs.get("P2"))
+
+                elif conversion_type == 9:
+                    conv["conversion_type"] = v4c.CONVERSION_TYPE_RAT
+
+                    coeffs = item.find("COEFFS")
+                    for i in range(1, 7):
+                        conv[f"P{i}"] = float(coeffs.get(f"P{i}"))
+
+                elif conversion_type == 11:
+                    conv["conversion_type"] = v4c.CONVERSION_TYPE_TABX
+                    vtab = item.find("COMPU_VTAB")
+
+                    if vtab is not None:
+                        for i, item in enumerate(vtab.findall("tab")):
+                            conv[f"val_{i}"] = float(item.get("min"))
+                            text = item.get("text")
+                            if isinstance(text, bytes):
+                                text = text.decode("utf-8", errors="replace")
+                            conv[f"text_{i}"] = text
+
+                elif conversion_type == 12:
+                    conv["conversion_type"] = v4c.CONVERSION_TYPE_RTABX
+                    vtab = item.find("COMPU_VTAB_RANGE")
+
+                    if vtab is not None:
+                        text = vtab.get("default")
+                        if isinstance(text, bytes):
+                            text = text.decode("utf-8", errors="replace")
+                        conv["default_addr"] = vtab.get("default")
+                        for i, item in enumerate(vtab.findall("tab_range")):
+                            conv[f"upper_{i}"] = float(item.get("max"))
+                            conv[f"lower_{i}"] = float(item.get("min"))
+                            text = item.get("text")
+                            if isinstance(text, bytes):
+                                text = text.decode("utf-8", errors="replace")
+                            conv[f"text_{i}"] = text
+                else:
+                    continue
+
+                conversions[conv["name"]] = conv
+
+            except:
+                print(format_exc())
+                continue
+
+        return conversions
+
+    def parse_channels(display, conversions):
+        channels = []
+        for elem in display.iterchildren():
+            if elem.tag == "CHANNEL":
+                channel_name = elem.get("name")
+
+                comment = elem.find("COMMENT")
+                if comment is not None:
+                    comment = elem.get("text")
+                else:
+                    comment = ""
+
+                color_ = int(elem.get("color"))
+                c = 0
+                for i in range(3):
+                    c = c << 8
+                    c += color_ & 0xFF
+                    color_ = color_ >> 8
+
+                ch_color = c
+
+                gain = abs(float(elem.get("gain")))
+                offset = float(elem.get("offset")) / 100
+
+                multi_color = elem.find("MULTI_COLOR")
+
+                ranges = []
+
+                if multi_color is not None:
+                    for color in multi_color.findall("color"):
+                        min_ = float(color.find("min").get("data"))
+                        max_ = float(color.find("max").get("data"))
+                        color_ = int(color.find("color").get("data"))
+                        c = 0
+                        for i in range(3):
+                            c = c << 8
+                            c += color_ & 0xFF
+                            color_ = color_ >> 8
+                        color = fn.mkColor(f"#{c:06X}")
+                        ranges.append(
+                            {
+                                "background_color": background,
+                                "font_color": color,
+                                "op1": "<=",
+                                "op2": "<=",
+                                "value1": min_,
+                                "value2": max_,
+                            }
+                        )
+
+                chan = {
+                    "color": f"#{ch_color:06X}",
+                    "common_axis": False,
+                    "computed": False,
+                    "flags": 0,
+                    "comment": comment,
+                    "enabled": elem.get("on") == "1",
+                    "fmt": "{}",
+                    "individual_axis": False,
+                    "name": channel_name,
+                    "mode": "phys",
+                    "precision": 3,
+                    "ranges": ranges,
+                    "unit": "",
+                    "type": "channel",
+                    "y_range": sorted(
+                        [
+                            -gain * offset,
+                            -gain * offset + 19 * gain,
+                        ]
+                    ),
+                    "origin_uuid": "000000000000",
+                }
+
+                conv_name = elem.get("cnv_name")
+                if conv_name in conversions:
+                    chan["conversion"] = deepcopy(conversions[conv_name])
+
+                channels.append(chan)
+
+            elif elem.tag.startswith("GROUP"):
+                channels.append(
+                    {
+                        "name": elem.get("data"),
+                        "enabled": elem.get("on") == "1",
+                        "type": "group",
+                        "channels": parse_channels(elem, conversions=conversions),
+                        "pattern": None,
+                        "origin_uuid": "000000000000",
+                        "ranges": [],
+                    }
+                )
+
+            elif elem.tag == "CHANNEL_PATTERN":
+                try:
+                    filter_type = elem.get("filter_type")
+                    if filter_type in ("None", None):
+                        filter_type = "Unspecified"
+                        filter_value = 0
+                        raw = False
+                    else:
+                        filter_value = float(elem.get("filter_value"))
+                        raw = bool(int(elem.get("filter_use_raw")))
+
+                    info = {
+                        "pattern": elem.get("name_pattern"),
+                        "name": elem.get("name_pattern"),
+                        "match_type": "Wildcard",
+                        "filter_type": filter_type,
+                        "filter_value": filter_value,
+                        "raw": raw,
+                    }
+
+                    multi_color = elem.find("MULTI_COLOR")
+
+                    ranges = []
+
+                    if multi_color is not None:
+                        for color in multi_color.findall("color"):
+                            min_ = float(color.find("min").get("data"))
+                            max_ = float(color.find("max").get("data"))
+                            color_ = int(color.find("color").get("data"))
+                            c = 0
+                            for i in range(3):
+                                c = c << 8
+                                c += color_ & 0xFF
+                                color_ = color_ >> 8
+                            color = fn.mkColor(f"#{c:06X}")
+                            ranges.append(
+                                {
+                                    "background_color": background,
+                                    "font_color": color,
+                                    "op1": "<=",
+                                    "op2": "<=",
+                                    "value1": min_,
+                                    "value2": max_,
+                                }
+                            )
+
+                    info["ranges"] = ranges
+
+                    channels.append(
+                        {
+                            "channels": [],
+                            "enabled": True,
+                            "name": info["pattern"],
+                            "pattern": info,
+                            "type": "group",
+                            "ranges": [],
+                            "origin_uuid": "000000000000",
+                        }
+                    )
+
+                except:
+                    print(format_exc())
+                    continue
+
+        return channels
+
+    def parse_virtual_channels(display):
+        channels = {}
+
+        if display is None:
+            return channels
+
+        for item in display.findall("V_CHAN"):
+            try:
+                virtual_channel = {}
+
+                parent = item.find("VIR_TIME_CHAN")
+                vtab = item.find("COMPU_VTAB")
+                if parent is None or vtab is None:
+                    continue
+
+                name = item.get("name")
+
+                virtual_channel["name"] = name
+                virtual_channel["parent"] = parent.get("data")
+                virtual_channel["comment"] = item.find("description").get("data")
+
+                conv = {}
+                for i, item in enumerate(vtab.findall("tab")):
+                    conv[f"val_{i}"] = float(item.get("min"))
+                    text = item.get("text")
+                    if isinstance(text, bytes):
+                        text = text.decode("utf-8", errors="replace")
+                    conv[f"text_{i}"] = text
+
+                virtual_channel["vtab"] = conv
+
+                channels[name] = virtual_channel
+            except:
+                continue
+
+        return channels
+
+    def parse_c_functions(display):
+        c_functions = set()
+
+        if display is None:
+            return c_functions
+
+        for item in display.findall("CALC_FUNC"):
+            string = item.text
+
+            for match in C_FUNCTION.finditer(string):
+                c_functions.add(match.group("function"))
+
+        return sorted(c_functions)
+
+    dsp = Path(file).read_bytes().replace(b"\0", b"")
+    dsp = lxml.etree.fromstring(dsp)
+
+    conversions = parse_conversions(dsp.find("COMPU_METHODS"))
+
+    channels = parse_channels(dsp.find("DISPLAY_INFO"), conversions)
+    c_functions = parse_c_functions(dsp)
+
+    functions = {}
+    virtual_channels = []
+
+    for i, ch in enumerate(parse_virtual_channels(dsp.find("VIRTUAL_CHANNEL")).values()):
+        virtual_channels.append(
+            {
+                "color": COLORS[i % len(COLORS)],
+                "common_axis": False,
+                "computed": True,
+                "computation": {
+                    "args": {"arg1": []},
+                    "type": "python_function",
+                    "channel_comment": ch["comment"],
+                    "channel_name": ch["name"],
+                    "channel_unit": "",
+                    "function": f"f_{ch['name']}",
+                    "triggering": "triggering_on_all",
+                    "triggering_value": "all",
+                },
+                "flags": int(SignalFlags.computed | SignalFlags.user_defined_conversion),
+                "enabled": True,
+                "fmt": "{}",
+                "individual_axis": False,
+                "name": ch["parent"],
+                "precision": 3,
+                "ranges": [],
+                "unit": "",
+                "conversion": ch["vtab"],
+                "user_defined_name": ch["name"],
+                "comment": f"Datalyser virtual channel: {ch['comment']}",
+                "origin_uuid": "000000000000",
+                "type": "channel",
+            }
+        )
+
+        functions[f"f_{ch['name']}"] = f"def f_{ch['name']}(arg1=0, t=0):\n    return arg1"
+
+    if virtual_channels:
+        channels.append(
+            {
+                "name": "Datalyser Virtual Channels",
+                "enabled": False,
+                "type": "group",
+                "channels": virtual_channels,
+                "pattern": None,
+                "origin_uuid": "000000000000",
+                "ranges": [],
+            }
+        )
+
+    info = {
+        "selected_channels": [],
+        "windows": [],
+        "has_virtual_channels": bool(virtual_channels),
+        "c_functions": c_functions,
+        "functions": functions,
+    }
+
+    if flat:
+        info = flatten_dsp(channels)
+    else:
+        plot = {
+            "type": "Plot",
+            "title": "Display channels",
+            "maximized": True,
+            "configuration": {
+                "channels": channels,
+                "locked": True,
+            },
+        }
+
+        info["windows"].append(plot)
+
+    return info
+
+
+def flatten_dsp(channels):
+    res = []
+
+    for item in channels:
+        if item["type"] == "group":
+            res.extend(flatten_dsp(item["channels"]))
+        else:
+            res.append(item["name"])
+
+    return res
+
+
+def load_channel_names_from_file(file_name, lab_section=""):
+    file_name = Path(file_name)
+
+    extension = file_name.suffix.lower()
+    if extension == ".dsp":
+        channels = load_dsp(file_name, flat=True)
+
+    elif extension == ".dspf":
+        with open(file_name) as infile:
+            info = json.load(infile)
+
+        channels = []
+        for window in info["windows"]:
+            if window["type"] == "Plot":
+                channels.extend(flatten_dsp(window["configuration"]["channels"]))
+            elif window["type"] == "Numeric":
+                channels.extend([item["name"] for item in window["configuration"]["channels"]])
+            elif window["type"] == "Tabular":
+                channels.extend(window["configuration"]["channels"])
+
+    elif extension == ".lab":
+        info = load_lab(file_name)
+        if info:
+            if len(info) > 1 and lab_section:
+                channels = info[lab_section]
+            else:
+                channels = list(info.values())[0]
+
+            channels = [name.split(";")[0] for name in channels]
+
+    elif extension == ".cfg":
+        with open(file_name) as infile:
+            info = json.load(infile)
+        channels = info.get("selected_channels", [])
+    elif extension == ".txt":
+        try:
+            with open(file_name) as infile:
+                info = json.load(infile)
+            channels = info.get("selected_channels", [])
+        except:
+            with open(file_name) as infile:
+                channels = [line.strip() for line in infile.readlines()]
+                channels = [name for name in channels if name]
+
+    return sorted(set(channels))
+
+
+def load_lab(file):
+    sections = {}
+    with open(file) as lab:
+        for line in lab:
+            line = line.strip()
+            if not line:
+                continue
+
+            if line.startswith("[") and line.endswith("]"):
+                section_name = line.strip("[]")
+                s = []
+                sections[section_name] = s
+
+            else:
+                if "s" in locals():
+                    s.append(line)
+
+    return {name: channels for name, channels in sections.items() if channels if name != "SETTINGS"}
+
+
+class SignalFlags:
+    no_flags = 0x0
+    user_defined_comment = 0x1
+    user_defined_conversion = 0x2
+    user_defined_unit = 0x4
+    user_defined_name = 0x8
+    stream_sync = 0x10
+    computed = 0x20
+    virtual = 0x40
+    virtual_master = 0x80
+
+
+def timeit(func):
+    def timed(*args, **kwargs):
+        t1 = perf_counter()
+        ret = func(*args, **kwargs)
+        t2 = perf_counter()
+        delta = t2 - t1
+        if delta >= 1e-3:
+            print(f"CALL {func.__qualname__}: {delta*1e3:.3f} ms")
+        else:
+            print(f"CALL {func.__qualname__}: {delta*1e6:.3f} us")
+        return ret
+
+    return timed

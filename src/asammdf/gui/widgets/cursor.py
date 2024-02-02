@@ -1,14 +1,12 @@
-# -*- coding: utf-8 -*-
-
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui
 
+from ... import tool as Tool
 from ...blocks.utils import escape_xml_string
+from ..utils import BLUE
 
 
 class Bookmark(pg.InfiniteLine):
-    tool = "asammdf"
-
     def __init__(self, message="", title="", color="#ffffff", tool="", **kwargs):
         self.title = title or "Bookmark"
 
@@ -32,7 +30,7 @@ class Bookmark(pg.InfiniteLine):
         self._message = ""
         self.message = message
 
-        if tool and tool == self.tool:
+        if tool and tool == Tool.__tool__:
             self.editable = True
         else:
             self.editable = False
@@ -40,12 +38,12 @@ class Bookmark(pg.InfiniteLine):
         self.edited = False
         self.deleted = False
 
-        self.fill = pg.mkBrush("#61b2e2")
+        self.fill = pg.mkBrush(BLUE)
         self.border = pg.mkPen(
             {
                 "color": color,
                 "width": 2,
-                "style": QtCore.Qt.DashLine,
+                "style": QtCore.Qt.PenStyle.DashLine,
             }
         )
 
@@ -72,9 +70,7 @@ class Bookmark(pg.InfiniteLine):
 
         ## add a 6-pixel radius around the line for mouse interaction.
 
-        px = self.pixelLength(
-            direction=pg.Point(1, 0), ortho=True
-        )  ## get pixel length orthogonal to the line
+        px = self.pixelLength(direction=pg.Point(1, 0), ortho=True)  ## get pixel length orthogonal to the line
         if px is None:
             px = 0
         pw = max(self.pen.width() / 2, self.hoverPen.width() / 2)
@@ -133,7 +129,7 @@ class Bookmark(pg.InfiniteLine):
 
             pen = self.pen
             pen.setWidth(self.line_width)
-            pen.setStyle(QtCore.Qt.DashLine)
+            pen.setStyle(QtCore.Qt.PenStyle.DashLine)
 
             paint.setPen(pen)
 
@@ -142,7 +138,11 @@ class Bookmark(pg.InfiniteLine):
             rect = plot.viewbox.sceneBoundingRect()
             delta = rect.x()
             height = rect.height()
-            width = rect.x() + rect.width()
+
+            px, py = plot.px, plot.py
+
+            plot.px = (plot.x_range[1] - plot.x_range[0]) / rect.width()
+            plot.py = rect.height()
 
             x, y = plot.scale_curve_to_pixmap(
                 position,
@@ -190,14 +190,12 @@ class Bookmark(pg.InfiniteLine):
                 paint.drawRect(rect2)
 
                 pix = QtGui.QPixmap(":/edit.png").scaled(16, 16)
-                paint.drawPixmap(
-                    QtCore.QPointF(rect.x() + rect.width() - 34, rect.y() + 1), pix
-                )
+                paint.drawPixmap(QtCore.QPointF(rect.x() + rect.width() - 34, rect.y() + 1), pix)
 
                 pix = QtGui.QPixmap(":/erase.png").scaled(16, 16)
-                paint.drawPixmap(
-                    QtCore.QPointF(rect.x() + rect.width() - 17, rect.y() + 1), pix
-                )
+                paint.drawPixmap(QtCore.QPointF(rect.x() + rect.width() - 17, rect.y() + 1), pix)
+
+            plot.px, plot.py = px, py
 
     def set_value(self, value):
         self.setPos(value)
@@ -214,7 +212,7 @@ class Bookmark(pg.InfiniteLine):
     def xml_comment(self):
         return f"""<EVcomment>
     <TX>{escape_xml_string(self.message)}</TX>
-    <tool>{Bookmark.tool}</tool>
+    <tool>{Tool.__tool__}</tool>
 </EVcomment>"""
 
 
@@ -237,7 +235,7 @@ class Cursor(pg.InfiniteLine):
         self.color = color
 
         # disable mouse cursor until https://github.com/pyqtgraph/pyqtgraph/issues/2416 is fixed
-        # self.setCursor(QtCore.Qt.SplitHCursor)
+        # self.setCursor(QtCore.Qt.CursorShape.SplitHCursor)
 
         self.sigDragged.connect(self.update_mouse_cursor)
         self.sigPositionChangeFinished.connect(self.update_mouse_cursor)
@@ -271,7 +269,7 @@ class Cursor(pg.InfiniteLine):
     def update_mouse_cursor(self, obj):
         if self.moving:
             if not self._cursor_override:
-                QtGui.QGuiApplication.setOverrideCursor(QtCore.Qt.SplitHCursor)
+                QtGui.QGuiApplication.setOverrideCursor(QtCore.Qt.CursorShape.SplitHCursor)
                 self._cursor_override = True
         else:
             if self._cursor_override is not None:
@@ -289,11 +287,11 @@ class Cursor(pg.InfiniteLine):
             pen.setWidth(self.line_width)
 
             if self.mouseHovering and self.movable:
-                pen.setStyle(QtCore.Qt.DashLine)
+                pen.setStyle(QtCore.Qt.PenStyle.DashLine)
             elif not self.locked:
-                pen.setStyle(QtCore.Qt.SolidLine)
+                pen.setStyle(QtCore.Qt.PenStyle.SolidLine)
             else:
-                pen.setStyle(QtCore.Qt.DashDotDotLine)
+                pen.setStyle(QtCore.Qt.PenStyle.DashDotDotLine)
 
             paint.setPen(pen)
 
@@ -303,6 +301,11 @@ class Cursor(pg.InfiniteLine):
             delta = rect.x()
             height = rect.height()
             width = rect.x() + rect.width()
+
+            px, py = plot.px, plot.py
+
+            plot.px = (plot.x_range[1] - plot.x_range[0]) / rect.width()
+            plot.py = rect.height()
 
             if not self.show_circle and not self.show_horizontal_line or not uuid:
                 x, y = plot.scale_curve_to_pixmap(
@@ -329,33 +332,21 @@ class Cursor(pg.InfiniteLine):
                         )
 
                         if self.show_circle:
-                            paint.drawLine(
-                                QtCore.QPointF(x, 0), QtCore.QPointF(x, y - 5)
-                            )
-                            paint.drawLine(
-                                QtCore.QPointF(x, y + 5), QtCore.QPointF(x, height)
-                            )
+                            paint.drawLine(QtCore.QPointF(x, 0), QtCore.QPointF(x, y - 5))
+                            paint.drawLine(QtCore.QPointF(x, y + 5), QtCore.QPointF(x, height))
 
                             if self.show_horizontal_line:
-                                paint.drawLine(
-                                    QtCore.QPointF(delta, y), QtCore.QPointF(x - 5, y)
-                                )
-                                paint.drawLine(
-                                    QtCore.QPointF(x + 5, y), QtCore.QPointF(width, y)
-                                )
+                                paint.drawLine(QtCore.QPointF(delta, y), QtCore.QPointF(x - 5, y))
+                                paint.drawLine(QtCore.QPointF(x + 5, y), QtCore.QPointF(width, y))
 
                             paint.setRenderHints(paint.RenderHint.Antialiasing, True)
                             paint.drawEllipse(QtCore.QPointF(x, y), 5, 5)
                             paint.setRenderHints(paint.RenderHint.Antialiasing, False)
 
                         else:
-                            paint.drawLine(
-                                QtCore.QPointF(x, 0), QtCore.QPointF(x, height)
-                            )
+                            paint.drawLine(QtCore.QPointF(x, 0), QtCore.QPointF(x, height))
                             if self.show_horizontal_line:
-                                paint.drawLine(
-                                    QtCore.QPointF(delta, y), QtCore.QPointF(width, y)
-                                )
+                                paint.drawLine(QtCore.QPointF(delta, y), QtCore.QPointF(width, y))
 
                     else:
                         x, y = plot.scale_curve_to_pixmap(
@@ -376,6 +367,8 @@ class Cursor(pg.InfiniteLine):
                     )
                     paint.drawLine(QtCore.QPointF(x, 0), QtCore.QPointF(x, height))
 
+            plot.px, plot.py = px, py
+
     def _computeBoundingRect(self):
         # br = UIGraphicsItem.boundingRect(self)
         vr = self.viewRect()  # bounds of containing ViewBox mapped to local coords.
@@ -384,9 +377,7 @@ class Cursor(pg.InfiniteLine):
 
         ## add a 6-pixel radius around the line for mouse interaction.
 
-        px = self.pixelLength(
-            direction=pg.Point(1, 0), ortho=True
-        )  ## get pixel length orthogonal to the line
+        px = self.pixelLength(direction=pg.Point(1, 0), ortho=True)  ## get pixel length orthogonal to the line
         if px is None:
             px = 0
         pw = max(self.pen.width() / 2, self.hoverPen.width() / 2)
@@ -448,17 +439,17 @@ class Region(pg.LinearRegionItem):
 
         # note LinearRegionItem.Horizontal and LinearRegionItem.Vertical
         # are kept for backward compatibility.
-        lineKwds = dict(
-            movable=movable,
-            bounds=bounds,
-            span=span,
-            pen=pen,
-            hoverPen=hoverPen,
-            show_circle=show_circle,
-            show_horizontal_line=show_horizontal_line,
-            line_width=line_width,
-            color=pen,
-        )
+        lineKwds = {
+            "movable": movable,
+            "bounds": bounds,
+            "span": span,
+            "pen": pen,
+            "hoverPen": hoverPen,
+            "show_circle": show_circle,
+            "show_horizontal_line": show_horizontal_line,
+            "line_width": line_width,
+            "color": pen,
+        }
 
         self.lines = [
             Cursor(QtCore.QPointF(values[0], 0), angle=90, **lineKwds),
@@ -489,6 +480,11 @@ class Region(pg.LinearRegionItem):
             delta = rect.x()
             height = rect.height()
 
+            px, py = plot.px, plot.py
+
+            plot.px = (plot.x_range[1] - plot.x_range[0]) / rect.width()
+            plot.py = rect.height()
+
             x1, y1 = plot.scale_curve_to_pixmap(
                 self.lines[0].value(),
                 0,
@@ -513,7 +509,9 @@ class Region(pg.LinearRegionItem):
 
             p.setBrush(self.currentBrush)
             p.setPen(pg.functions.mkPen(None))
-            p.setCompositionMode(QtGui.QPainter.CompositionMode_SourceAtop)
+            p.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceAtop)
             p.drawRect(rect)
             for line in self.lines:
                 line.paint(p, *args, plot=plot, uuid=uuid)
+
+            plot.px, plot.py = px, py

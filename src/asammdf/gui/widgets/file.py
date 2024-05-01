@@ -13,6 +13,8 @@ from natsort import natsorted
 import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
 
+import asammdf.mdf as mdf_module
+
 from ... import tool
 from ...blocks.utils import (
     extract_encryption_information,
@@ -33,7 +35,6 @@ from ...blocks.v4_constants import (
     FLAG_AT_TO_STRING,
     FLAG_CG_BUS_EVENT,
 )
-from ...mdf import MDF, SUPPORTED_VERSIONS
 from ..dialogs.advanced_search import AdvancedSearch
 from ..dialogs.channel_group_info import ChannelGroupInfoDialog
 from ..dialogs.channel_info import ChannelInfoDialog
@@ -128,7 +129,9 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
     ):
         self.default_folder = kwargs.pop("default_folder", "")
         display_file = kwargs.pop("display_file", "")
+        database_file = kwargs.pop("database_file", None)
         show_progress = kwargs.pop("show_progress", True)
+        process_bus_logging = kwargs.pop("process_bus_logging", True)
 
         self._progress = None
 
@@ -175,13 +178,13 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
             progress = None
 
         try:
-            if file_name.suffix.lower() in (".erg", ".bsig", ".dl3", ".tdms"):
+            if file_name.suffix.lower() in (".asc", ".blf", ".erg", ".bsig", ".dl3", ".tdms"):
                 extension = file_name.suffix.lower().strip(".")
                 if progress:
                     progress.setLabelText(f"Converting from {extension} to mdf")
 
                 try:
-                    from mfile import BSIG, DL3, ERG, TDMS
+                    from mfile import ASC, BLF, BSIG, DL3, ERG, TDMS
                 except ImportError:
                     from cmerg import BSIG, ERG
 
@@ -191,15 +194,22 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                     cls = BSIG
                 elif file_name.suffix.lower() == ".tdms":
                     cls = TDMS
+                elif file_name.suffix.lower() == ".asc":
+                    cls = ASC
+                elif file_name.suffix.lower() == ".blf":
+                    cls = BLF
                 else:
                     cls = DL3
 
                 out_file = Path(gettempdir()) / file_name.name
-                meas_file = cls(file_name)
+                if file_name.suffix.lower() in (".asc", ".blf"):
+                    meas_file = cls(file_name, database=database_file)
+                else:
+                    meas_file = cls(file_name)
 
                 mdf_path = meas_file.export_mdf().save(out_file.with_suffix(".tmp.mf4"))
                 meas_file.close()
-                self.mdf = MDF(mdf_path)
+                self.mdf = mdf_module.MDF(mdf_path, process_bus_logging=process_bus_logging)
                 self.mdf.original_name = file_name
                 self.mdf.uuid = self.uuid
 
@@ -220,7 +230,7 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
 
                         df = pd.read_csv(csv, header=None, names=names)
                         df.set_index(df[names[0]], inplace=True)
-                        self.mdf = MDF()
+                        self.mdf = mdf_module.MDF()
                         self.mdf.append(df, units=units)
                         self.mdf.uuid = self.uuid
                         self.mdf.original_name = file_name
@@ -236,12 +246,13 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
             else:
                 original_name = file_name
 
-                target = MDF
+                target = mdf_module.MDF
                 kwargs = {
                     "name": file_name,
                     "callback": self.update_progress,
                     "password": password,
                     "use_display_names": True,
+                    "process_bus_logging": process_bus_logging,
                 }
 
                 self.mdf = run_thread_with_progress(
@@ -302,13 +313,13 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
 
             self.output_options.setCurrentIndex(0)
 
-            self.mdf_version.insertItems(0, SUPPORTED_VERSIONS)
+            self.mdf_version.insertItems(0, mdf_module.SUPPORTED_VERSIONS)
             self.mdf_version.setCurrentText("4.10")
             self.mdf_compression.insertItems(0, ("no compression", "deflate", "transposed deflate"))
             self.mdf_compression.setCurrentText("transposed deflate")
             self.mdf_split_size.setValue(4)
 
-            self.extract_bus_format.insertItems(0, SUPPORTED_VERSIONS)
+            self.extract_bus_format.insertItems(0, mdf_module.SUPPORTED_VERSIONS)
             self.extract_bus_format.setCurrentText("4.10")
             index = self.extract_bus_format.findText(self.mdf.version)
             if index >= 0:
@@ -518,6 +529,9 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                     if default_display_file.exists():
                         self.load_channel_list(file_name=default_display_file)
 
+        self.restore_export_setttings()
+        self.connect_export_updates()
+
     def sizeHint(self):
         return QtCore.QSize(1, 1)
 
@@ -551,8 +565,7 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
         signals = set()
 
         if widget.mode == "Internal file structure":
-            while iterator.value():
-                item = iterator.value()
+            while item := iterator.value():
 
                 if item.entry[1] != 0xFFFFFFFFFFFFFFFF:
                     if item.checkState(0) == QtCore.Qt.CheckState.Checked:
@@ -560,8 +573,7 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
 
                 iterator += 1
         else:
-            while iterator.value():
-                item = iterator.value()
+            while item := iterator.value():
 
                 if item.checkState(0) == QtCore.Qt.CheckState.Checked:
                     signals.add(item.entry)
@@ -806,8 +818,7 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                     dg_cntr = -1
                     ch_cntr = 0
 
-                    while iterator.value():
-                        item = iterator.value()
+                    while item := iterator.value():
                         if item.parent() is None:
                             iterator += 1
                             dg_cntr += 1
@@ -819,17 +830,15 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                         if entry in result:
                             item.setCheckState(0, QtCore.Qt.CheckState.Checked)
                             names.add((result[entry], dg_cntr, ch_cntr))
-                        else:
-                            item.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
 
                         iterator += 1
                         ch_cntr += 1
+
                 elif view.currentText() == "Selected channels only":
                     iterator = QtWidgets.QTreeWidgetItemIterator(widget)
 
                     signals = set()
-                    while iterator.value():
-                        item = iterator.value()
+                    while item := iterator.value():
 
                         if item.checkState(0) == QtCore.Qt.CheckState.Checked:
                             signals.add((item.text(0), *item.entry))
@@ -841,6 +850,7 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                     signals = signals | names
 
                     widget.clear()
+                    self._selected_filter = {e[0] for e in signals}
 
                     items = []
                     for name, gp_index, ch_index in signals:
@@ -856,16 +866,15 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                         items.sort(key=lambda x: x.name)
                     widget.addTopLevelItems(items)
 
+                    self.update_selected_filter_channels()
+
                 else:
                     iterator = QtWidgets.QTreeWidgetItemIterator(widget)
-                    while iterator.value():
-                        item = iterator.value()
+                    while item := iterator.value():
 
                         if item.entry in result:
                             item.setCheckState(0, QtCore.Qt.CheckState.Checked)
                             names.add((result[item.entry], *item.entry))
-                        else:
-                            item.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
 
                         iterator += 1
 
@@ -939,8 +948,7 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
 
         signals = []
         if self.channel_view.currentText() == "Internal file structure":
-            while iterator.value():
-                item = iterator.value()
+            while item := iterator.value():
                 if item.parent() is None:
                     iterator += 1
                     continue
@@ -950,8 +958,7 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
 
                 iterator += 1
         else:
-            while iterator.value():
-                item = iterator.value()
+            while item := iterator.value():
 
                 if item.checkState(0) == QtCore.Qt.CheckState.Checked:
                     signals.append(item.text(0))
@@ -1193,7 +1200,7 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
                             zipped_mf4.close()
                             mdf_file_name.unlink()
 
-                        self.mdf = MDF(
+                        self.mdf = mdf_module.MDF(
                             name=original_file_name,
                             callback=self.update_progress,
                             password=_password,
@@ -1222,8 +1229,7 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
             iterator = QtWidgets.QTreeWidgetItemIterator(self.channels_tree)
 
             if self.channel_view.currentText() == "Internal file structure":
-                while iterator.value():
-                    item = iterator.value()
+                while item := iterator.value():
                     if item.parent() is None:
                         iterator += 1
                         continue
@@ -1237,8 +1243,7 @@ class FileWidget(WithMDIArea, Ui_file_widget, QtWidgets.QWidget):
 
                     iterator += 1
             else:
-                while iterator.value():
-                    item = iterator.value()
+                while item := iterator.value():
 
                     channel_name = item.text(0)
                     if channel_name in channels:
@@ -1533,8 +1538,7 @@ MultiRasterSeparator;&
     def clear_filter(self):
         iterator = QtWidgets.QTreeWidgetItemIterator(self.filter_tree)
 
-        while iterator.value():
-            item = iterator.value()
+        while item := iterator.value():
             item.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
 
             if item.parent() is None:
@@ -1546,16 +1550,14 @@ MultiRasterSeparator;&
         iterator = QtWidgets.QTreeWidgetItemIterator(self.channels_tree)
 
         if self.channel_view.currentIndex() == 1:
-            while iterator.value():
-                item = iterator.value()
+            while item := iterator.value():
                 if item.parent() is None:
                     item.setExpanded(False)
                 else:
                     item.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
                 iterator += 1
         else:
-            while iterator.value():
-                item = iterator.value()
+            while item := iterator.value():
                 item.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
                 iterator += 1
 
@@ -1563,16 +1565,14 @@ MultiRasterSeparator;&
         iterator = QtWidgets.QTreeWidgetItemIterator(self.channels_tree)
 
         if self.channel_view.currentIndex() == 1:
-            while iterator.value():
-                item = iterator.value()
+            while item := iterator.value():
                 if item.parent() is None:
                     item.setExpanded(False)
                 else:
                     item.setCheckState(0, QtCore.Qt.CheckState.Checked)
                 iterator += 1
         else:
-            while iterator.value():
-                item = iterator.value()
+            while item := iterator.value():
                 item.setCheckState(0, QtCore.Qt.CheckState.Checked)
                 iterator += 1
 
@@ -1679,8 +1679,7 @@ MultiRasterSeparator;&
                 signals = []
 
                 if self.channel_view.currentIndex() == 1:
-                    while iterator.value():
-                        item = iterator.value()
+                    while item := iterator.value():
                         if item.parent() is None:
                             iterator += 1
                             continue
@@ -1704,8 +1703,7 @@ MultiRasterSeparator;&
 
                         iterator += 1
                 else:
-                    while iterator.value():
-                        item = iterator.value()
+                    while item := iterator.value():
 
                         if item.checkState(0) == QtCore.Qt.CheckState.Checked:
                             group, index = item.entry
@@ -1736,7 +1734,7 @@ MultiRasterSeparator;&
         progress.signals.setLabelText.emit(f'Scrambling "{self.file_name}"')
 
         # scrambling self.mdf
-        MDF.scramble(name=self.file_name, progress=progress)
+        mdf_module.MDF.scramble(name=self.file_name, progress=progress)
 
     def scramble_finished(self):
         if self._progress.error is None and self._progress.result is not TERMINATED:
@@ -2474,11 +2472,21 @@ MultiRasterSeparator;&
     def toggle_frames(self, event=None):
         self._frameless_windows = not self._frameless_windows
 
+        for window in self.mdi_area.subWindowList():
+            wid = window.widget()
+            if isinstance(wid, Plot):
+                wid._inhibit_x_range_changed_signal = True
+
         for w in self.mdi_area.subWindowList():
             if self._frameless_windows:
                 w.setWindowFlags(w.windowFlags() | QtCore.Qt.WindowType.FramelessWindowHint)
             else:
                 w.setWindowFlags(w.windowFlags() & (~QtCore.Qt.WindowType.FramelessWindowHint))
+
+        for window in self.mdi_area.subWindowList():
+            wid = window.widget()
+            if isinstance(wid, Plot):
+                wid._inhibit_x_range_changed_signal = True
 
     def autofit_sub_plots(self):
         geometries = []
@@ -2583,8 +2591,7 @@ MultiRasterSeparator;&
         channels = []
 
         if self.filter_view.currentText() == "Internal file structure":
-            while iterator.value():
-                item = iterator.value()
+            while item := iterator.value():
 
                 group, index = item.entry
 
@@ -2594,8 +2601,7 @@ MultiRasterSeparator;&
 
                 iterator += 1
         else:
-            while iterator.value():
-                item = iterator.value()
+            while item := iterator.value():
 
                 if item.checkState(0) == QtCore.Qt.CheckState.Checked:
                     group, index = item.entry
@@ -2894,7 +2900,7 @@ MultiRasterSeparator;&
             if handle_overwrite:
                 original_name = file_name
 
-                self.mdf = MDF(
+                self.mdf = mdf_module.MDF(
                     name=file_name,
                     password=_password,
                     use_display_names=True,
@@ -2970,7 +2976,7 @@ MultiRasterSeparator;&
             name = list(result)[0]
             self.raster_channel.setCurrentText(name)
 
-    def filter_changed(self, item, column):
+    def filter_changed(self, item, column=0):
         name = item.text(0)
         if self.filter_view.currentText() == "Internal file structure":
             if item.checkState(0) == QtCore.Qt.CheckState.Checked and item.parent() is not None:
@@ -3187,7 +3193,7 @@ MultiRasterSeparator;&
             zipped_mf4.close()
             file_name.unlink()
 
-        self.mdf = MDF(
+        self.mdf = mdf_module.MDF(
             name=original_file_name,
             callback=self.update_progress,
             password=_password,
@@ -3298,3 +3304,135 @@ MultiRasterSeparator;&
                 dsp["display_file_name"] = "user_embedded_display.dspf"
 
                 self.load_channel_list(file_name=dsp)
+
+    def connect_export_updates(self):
+        self.output_format.currentTextChanged.connect(self.store_export_setttings)
+
+        self.mdf_version.currentTextChanged.connect(self.store_export_setttings)
+        self.mdf_compression.currentTextChanged.connect(self.store_export_setttings)
+        self.mdf_split.stateChanged.connect(self.store_export_setttings)
+        self.mdf_split_size.valueChanged.connect(self.store_export_setttings)
+
+        self.single_time_base.stateChanged.connect(self.store_export_setttings)
+        self.time_from_zero.stateChanged.connect(self.store_export_setttings)
+        self.time_as_date.stateChanged.connect(self.store_export_setttings)
+        self.raw.stateChanged.connect(self.store_export_setttings)
+        self.use_display_names.stateChanged.connect(self.store_export_setttings)
+        self.reduce_memory_usage.stateChanged.connect(self.store_export_setttings)
+        self.export_compression.currentTextChanged.connect(self.store_export_setttings)
+        self.empty_channels.currentTextChanged.connect(self.store_export_setttings)
+
+        self.single_time_base_csv.stateChanged.connect(self.store_export_setttings)
+        self.time_from_zero_csv.stateChanged.connect(self.store_export_setttings)
+        self.time_as_date_csv.stateChanged.connect(self.store_export_setttings)
+        self.raw_csv.stateChanged.connect(self.store_export_setttings)
+        self.add_units.stateChanged.connect(self.store_export_setttings)
+        self.doublequote.stateChanged.connect(self.store_export_setttings)
+        self.use_display_names_csv.stateChanged.connect(self.store_export_setttings)
+        self.empty_channels_csv.currentTextChanged.connect(self.store_export_setttings)
+        self.delimiter.editingFinished.connect(self.store_export_setttings)
+        self.escapechar.editingFinished.connect(self.store_export_setttings)
+        self.lineterminator.editingFinished.connect(self.store_export_setttings)
+        self.quotechar.editingFinished.connect(self.store_export_setttings)
+        self.quoting.currentTextChanged.connect(self.store_export_setttings)
+
+        self.single_time_base_mat.stateChanged.connect(self.store_export_setttings)
+        self.time_from_zero_mat.stateChanged.connect(self.store_export_setttings)
+        self.time_as_date_mat.stateChanged.connect(self.store_export_setttings)
+        self.raw_mat.stateChanged.connect(self.store_export_setttings)
+        self.use_display_names_mat.stateChanged.connect(self.store_export_setttings)
+        self.reduce_memory_usage_mat.stateChanged.connect(self.store_export_setttings)
+        self.empty_channels_mat.currentTextChanged.connect(self.store_export_setttings)
+        self.export_compression_mat.currentTextChanged.connect(self.store_export_setttings)
+        self.mat_format.currentTextChanged.connect(self.store_export_setttings)
+        self.oned_as.currentTextChanged.connect(self.store_export_setttings)
+
+    def restore_export_setttings(self):
+        self.output_format.setCurrentText(self._settings.value("export", "MDF"))
+
+        self.mdf_version.setCurrentText(self._settings.setValue("export/MDF/version", "4.10"))
+        self.mdf_compression.setCurrentText(self._settings.value("export/MDF/compression", "transposed deflate"))
+        self.mdf_split.setChecked(self._settings.value("export/MDF/split_data_blocks", True, type=bool))
+        self.mdf_split_size.setValue(self._settings.value("export/MDF/split_size", 4, type=int))
+
+        self.single_time_base.setChecked(self._settings.value("export/HDF5/single_time_base", False, type=bool))
+        self.time_from_zero.setChecked(self._settings.value("export/HDF5/time_from_zero", False, type=bool))
+        self.time_as_date.setChecked(self._settings.value("export/HDF5/time_as_date", False, type=bool))
+        self.raw.setChecked(self._settings.value("export/HDF5/raw", False, type=bool))
+        self.use_display_names.setChecked(self._settings.value("export/HDF5/use_display_names", False, type=bool))
+        self.reduce_memory_usage.setChecked(self._settings.value("export/HDF5/reduce_memory_usage", False, type=bool))
+        self.export_compression.setCurrentText(self._settings.value("export/HDF5/export_compression", "gzip"))
+        self.empty_channels.setCurrentText(self._settings.value("export/HDF5/empty_channels", "skip"))
+
+        self.single_time_base_csv.setChecked(self._settings.value("export/CSV/single_time_base_csv", False, type=bool))
+        self.time_from_zero_csv.setChecked(self._settings.value("export/CSV/time_from_zero_csv", False, type=bool))
+        self.time_as_date_csv.setChecked(self._settings.value("export/CSV/time_as_date_csv", False, type=bool))
+        self.raw_csv.setChecked(self._settings.value("export/CSV/raw_csv", False, type=bool))
+        self.add_units.setChecked(self._settings.value("export/CSV/add_units", False, type=bool))
+        self.doublequote.setChecked(self._settings.value("export/CSV/doublequote", False, type=bool))
+        self.use_display_names_csv.setChecked(
+            self._settings.value("export/CSV/use_display_names_csv", False, type=bool)
+        )
+        self.empty_channels_csv.setCurrentText(self._settings.value("export/CSV/empty_channels_csv", "skip"))
+        self.delimiter.setText(self._settings.value("export/CSV/delimiter", ","))
+        self.escapechar.setText(self._settings.value("export/CSV/escapechar", ""))
+        self.lineterminator.setText(self._settings.value("export/CSV/lineterminator", r"\r\n"))
+        self.quotechar.setText(self._settings.value("export/CSV/quotechar", '"'))
+        self.quoting.setCurrentText(self._settings.value("export/CSV/quoting", "MINIMAL"))
+
+        self.single_time_base_mat.setChecked(self._settings.value("export/MAT/single_time_base_mat", False, type=bool))
+        self.time_from_zero_mat.setChecked(self._settings.value("export/MAT/time_from_zero_mat", False, type=bool))
+        self.time_as_date_mat.setChecked(self._settings.value("export/MAT/time_as_date_mat", False, type=bool))
+        self.raw_mat.setChecked(self._settings.value("export/MAT/raw_mat", False, type=bool))
+        self.use_display_names_mat.setChecked(
+            self._settings.value("export/MAT/use_display_names_mat", False, type=bool)
+        )
+        self.reduce_memory_usage_mat.setChecked(
+            self._settings.value("export/MAT/reduce_memory_usage_mat", False, type=bool)
+        )
+        self.empty_channels_mat.setCurrentText(self._settings.value("export/MAT/empty_channels_mat", "skip"))
+        self.export_compression_mat.setCurrentText(self._settings.value("export/MAT/export_compression_mat", "enabled"))
+        self.mat_format.setCurrentText(self._settings.value("export/MAT/mat_format", "4"))
+        self.oned_as.setCurrentText(self._settings.value("export/MAT/oned_as", "row"))
+
+    def store_export_setttings(self, *args):
+        self._settings.setValue("export", self.output_format.currentText())
+
+        self._settings.setValue("export/MDF/version", self.mdf_version.currentText())
+        self._settings.setValue("export/MDF/compression", self.mdf_compression.currentText())
+        self._settings.setValue("export/MDF/split_data_blocks", self.mdf_split.isChecked())
+        self._settings.setValue("export/MDF/split_size", self.mdf_split_size.value())
+
+        self._settings.setValue("export/HDF5/single_time_base", self.single_time_base.isChecked())
+        self._settings.setValue("export/HDF5/time_from_zero", self.time_from_zero.isChecked())
+        self._settings.setValue("export/HDF5/time_as_date", self.time_as_date.isChecked())
+        self._settings.setValue("export/HDF5/raw", self.raw.isChecked())
+        self._settings.setValue("export/HDF5/use_display_names", self.use_display_names.isChecked())
+        self._settings.setValue("export/HDF5/reduce_memory_usage", self.reduce_memory_usage.isChecked())
+        self._settings.setValue("export/HDF5/export_compression", self.export_compression.currentText())
+        self._settings.setValue("export/HDF5/empty_channels", self.empty_channels.currentText())
+
+        self._settings.setValue("export/CSV/single_time_base_csv", self.single_time_base_csv.isChecked())
+        self._settings.setValue("export/CSV/time_from_zero_csv", self.time_from_zero_csv.isChecked())
+        self._settings.setValue("export/CSV/time_as_date_csv", self.time_as_date_csv.isChecked())
+        self._settings.setValue("export/CSV/raw_csv", self.raw_csv.isChecked())
+        self._settings.setValue("export/CSV/add_units", self.add_units.isChecked())
+        self._settings.setValue("export/CSV/doublequote", self.doublequote.isChecked())
+        self._settings.setValue("export/CSV/use_display_names_csv", self.use_display_names_csv.isChecked())
+        self._settings.setValue("export/CSV/empty_channels_csv", self.empty_channels_csv.currentText())
+        self._settings.setValue("export/CSV/delimiter", self.delimiter.text())
+        self._settings.setValue("export/CSV/escapechar", self.escapechar.text())
+        self._settings.setValue("export/CSV/lineterminator", self.lineterminator.text())
+        self._settings.setValue("export/CSV/quotechar", self.quotechar.text())
+        self._settings.setValue("export/CSV/quoting", self.quoting.currentText())
+
+        self._settings.setValue("export/MAT/single_time_base_mat", self.single_time_base_mat.isChecked())
+        self._settings.setValue("export/MAT/time_from_zero_mat", self.time_from_zero_mat.isChecked())
+        self._settings.setValue("export/MAT/time_as_date_mat", self.time_as_date_mat.isChecked())
+        self._settings.setValue("export/MAT/raw_mat", self.raw_mat.isChecked())
+        self._settings.setValue("export/MAT/use_display_names_mat", self.use_display_names_mat.isChecked())
+        self._settings.setValue("export/MAT/reduce_memory_usage_mat", self.reduce_memory_usage_mat.isChecked())
+        self._settings.setValue("export/MAT/empty_channels_mat", self.empty_channels_mat.currentText())
+        self._settings.setValue("export/MAT/export_compression_mat", self.export_compression_mat.currentText())
+        self._settings.setValue("export/MAT/mat_format", self.mat_format.currentText())
+        self._settings.setValue("export/MAT/oned_as", self.oned_as.currentText())

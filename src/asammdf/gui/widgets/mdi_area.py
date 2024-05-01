@@ -17,6 +17,8 @@ import numpy as np
 import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
 
+import asammdf.mdf as mdf_module
+
 from ...blocks import v4_constants as v4c
 from ...blocks.conversion_utils import from_dict
 from ...blocks.utils import (
@@ -27,7 +29,6 @@ from ...blocks.utils import (
     MdfException,
 )
 from ...blocks.v4_blocks import EventBlock, HeaderBlock
-from ...mdf import MDF
 from ...signal import Signal
 from ..dialogs.channel_info import ChannelInfoDialog
 from ..dialogs.messagebox import MessageBox
@@ -541,6 +542,23 @@ class MdiAreaWidget(QtWidgets.QMdiArea):
         )
         self.show()
 
+    def cascadeSubWindows(self):
+        sub_windows = self.subWindowList()
+        if not sub_windows:
+            return
+
+        for window in sub_windows:
+            wid = window.widget()
+            if isinstance(wid, Plot):
+                wid._inhibit_x_range_changed_signal = True
+
+        super().cascadeSubWindows()
+
+        for window in sub_windows:
+            wid = window.widget()
+            if isinstance(wid, Plot):
+                wid._inhibit_x_range_changed_signal = False
+
     def dragEnterEvent(self, e):
         e.accept()
         super().dragEnterEvent(e)
@@ -590,6 +608,11 @@ class MdiAreaWidget(QtWidgets.QMdiArea):
         ratio = height // len(sub_windows)
 
         for window in sub_windows:
+            wid = window.widget()
+            if isinstance(wid, Plot):
+                wid._inhibit_x_range_changed_signal = True
+
+        for window in sub_windows:
             if window.isMinimized() or window.isMaximized():
                 window.showNormal()
             rect = QtCore.QRect(0, 0, width, ratio)
@@ -597,6 +620,11 @@ class MdiAreaWidget(QtWidgets.QMdiArea):
             window.setGeometry(rect)
             window.move(position)
             position.setY(position.y() + ratio)
+
+        for window in sub_windows:
+            wid = window.widget()
+            if isinstance(wid, Plot):
+                wid._inhibit_x_range_changed_signal = False
 
     def tile_vertically(self):
         sub_windows = self.subWindowList()
@@ -610,6 +638,11 @@ class MdiAreaWidget(QtWidgets.QMdiArea):
         ratio = width // len(sub_windows)
 
         for window in sub_windows:
+            wid = window.widget()
+            if isinstance(wid, Plot):
+                wid._inhibit_x_range_changed_signal = True
+
+        for window in sub_windows:
             if window.isMinimized() or window.isMaximized():
                 window.showNormal()
             rect = QtCore.QRect(0, 0, ratio, height)
@@ -617,6 +650,28 @@ class MdiAreaWidget(QtWidgets.QMdiArea):
             window.setGeometry(rect)
             window.move(position)
             position.setX(position.x() + ratio)
+
+        for window in sub_windows:
+            wid = window.widget()
+            if isinstance(wid, Plot):
+                wid._inhibit_x_range_changed_signal = False
+
+    def tileSubWindows(self):
+        sub_windows = self.subWindowList()
+        if not sub_windows:
+            return
+
+        for window in sub_windows:
+            wid = window.widget()
+            if isinstance(wid, Plot):
+                wid._inhibit_x_range_changed_signal = True
+
+        super().tileSubWindows()
+
+        for window in sub_windows:
+            wid = window.widget()
+            if isinstance(wid, Plot):
+                wid._inhibit_x_range_changed_signal = False
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -3425,8 +3480,7 @@ class WithMDIArea:
             plot.cursor_info.set_precision(window_info["configuration"]["cursor_precision"])
 
         iterator = QtWidgets.QTreeWidgetItemIterator(plot.channel_selection)
-        while iterator.value():
-            item = iterator.value()
+        while item := iterator.value():
             iterator += 1
 
             if item.type() == item.Group:
@@ -3956,7 +4010,7 @@ class WithMDIArea:
         )
 
         if file_name:
-            with MDF() as mdf:
+            with mdf_module.MDF() as mdf:
                 for mdi in self.mdi_area.subWindowList():
                     widget = mdi.widget()
 
@@ -4142,7 +4196,7 @@ class WithMDIArea:
             zipped_mf4.close()
             file_name.unlink()
 
-        self.mdf = MDF(
+        self.mdf = mdf_module.MDF(
             name=original_file_name,
             callback=self.update_progress,
             password=_password,

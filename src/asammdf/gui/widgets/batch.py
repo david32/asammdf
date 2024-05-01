@@ -6,6 +6,8 @@ from traceback import format_exc
 from natsort import natsorted
 from PySide6 import QtCore, QtGui, QtWidgets
 
+import asammdf.mdf as mdf_module
+
 from ...blocks.utils import (
     extract_xml_comment,
     load_channel_names_from_file,
@@ -20,7 +22,6 @@ from ...blocks.v4_constants import (
     BUS_TYPE_LIN,
     BUS_TYPE_USB,
 )
-from ...mdf import MDF, SUPPORTED_VERSIONS
 from ..dialogs.advanced_search import AdvancedSearch
 from ..dialogs.messagebox import MessageBox
 from ..ui.batch_widget import Ui_batch_widget
@@ -69,7 +70,7 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
             self.extract_bus_format,
             self.mdf_version,
         ):
-            widget.insertItems(0, SUPPORTED_VERSIONS)
+            widget.insertItems(0, mdf_module.SUPPORTED_VERSIONS)
             widget.setCurrentText("4.10")
 
         for widget in (
@@ -168,6 +169,9 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
             self.lin_database_list.setItemWidget(item, widget)
             item.setSizeHint(widget.sizeHint())
 
+        self.restore_export_setttings()
+        self.connect_export_updates()
+
     def set_raster_type(self, event):
         if self.raster_type_channel.isChecked():
             self.raster_channel.setEnabled(True)
@@ -213,7 +217,7 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
         for i, source_file in enumerate(source_files):
             progress.signals.setLabelText.emit(f"Scrambling file {i+1} of {count}\n{source_file}")
 
-            result = MDF.scramble(name=source_file, progress=progress)
+            result = mdf_module.MDF.scramble(name=source_file, progress=progress)
             if result is TERMINATED:
                 return
 
@@ -302,8 +306,8 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
         for i, (file, source_file) in enumerate(zip(files, source_files)):
             progress.signals.setLabelText.emit(f"Extracting Bus logging from file {i+1} of {count}\n{source_file}")
 
-            if not isinstance(file, MDF):
-                mdf = MDF(file)
+            if not isinstance(file, mdf_module.MDF):
+                mdf = mdf_module.MDF(file)
             else:
                 mdf = file
 
@@ -491,8 +495,8 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
         for i, (file, source_file) in enumerate(zip(files, source_files)):
             progress.signals.setLabelText.emit(f"Extracting Bus logging from file {i+1} of {count}")
 
-            if not isinstance(file, MDF):
-                mdf = MDF(file)
+            if not isinstance(file, mdf_module.MDF):
+                mdf = mdf_module.MDF(file)
             else:
                 mdf = file
 
@@ -700,7 +704,7 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
 
         files = self._prepare_files(source_files, progress)
 
-        result = MDF.concatenate(
+        result = mdf_module.MDF.concatenate(
             files=files,
             version=version,
             sync=sync,
@@ -748,7 +752,7 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
 
         files = self._prepare_files(source_files, progress)
 
-        result = MDF.stack(
+        result = mdf_module.MDF.stack(
             files=files,
             version=version,
             sync=sync,
@@ -861,7 +865,7 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
             mdf.original_name = file_name
 
         elif suffix in (".mdf", ".mf4", ".mf4z"):
-            mdf = MDF(file_name)
+            mdf = mdf_module.MDF(file_name)
 
         else:
             raise ValueError(f"Incompatible suffix '{suffix}'")
@@ -898,8 +902,7 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
         total = 0
 
         if self.filter_view.currentText() == "Internal file structure":
-            while iterator.value():
-                item = iterator.value()
+            while item := iterator.value():
 
                 group, index = item.entry
                 if index != 0xFFFFFFFFFFFFFFFF:
@@ -912,8 +915,7 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
 
                 iterator += 1
         else:
-            while iterator.value():
-                item = iterator.value()
+            while item := iterator.value():
 
                 if item.checkState(0) == QtCore.Qt.CheckState.Checked:
                     group, index = item.entry
@@ -936,7 +938,7 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
         if not self.files_list.count():
             return
 
-        with MDF(self.files_list.item(0).text()) as mdf:
+        with mdf_module.MDF(self.files_list.item(0).text()) as mdf:
             dlg = AdvancedSearch(
                 mdf,
                 show_add_window=False,
@@ -951,7 +953,7 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
                 name = list(result)[0]
                 self.raster_channel.setCurrentText(name)
 
-    def filter_changed(self, item, column):
+    def filter_changed(self, item, column=0):
         name = item.text(0)
         if item.checkState(0) == QtCore.Qt.CheckState.Checked:
             self._selected_filter.add(name)
@@ -1011,8 +1013,6 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
 
                         if (dg_cntr, ch_cntr) in result:
                             item.setCheckState(0, QtCore.Qt.CheckState.Checked)
-                        else:
-                            item.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
 
                         iterator += 1
                         ch_cntr += 1
@@ -1021,8 +1021,7 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
                     iterator = QtWidgets.QTreeWidgetItemIterator(widget)
 
                     signals = set()
-                    while iterator.value():
-                        item = iterator.value()
+                    while item := iterator.value():
 
                         if item.checkState(0) == QtCore.Qt.CheckState.Checked:
                             signals.add(item.entry)
@@ -1032,28 +1031,32 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
                     signals = signals | set(result)
 
                     widget.clear()
+                    self._selected_filter.clear()
+
+                    uuid = os.urandom(6).hex()
 
                     items = []
                     for entry in signals:
                         gp_index, ch_index = entry
                         ch = mdf.groups[gp_index].channels[ch_index]
-                        channel = MinimalTreeItem(entry, ch.name, strings=[ch.name], origin_uuid=self.uuid)
+                        channel = MinimalTreeItem(entry, ch.name, strings=[ch.name], origin_uuid=uuid)
                         channel.setCheckState(0, QtCore.Qt.CheckState.Checked)
                         items.append(channel)
+                        self._selected_filter.add(ch.name)
 
                     if len(items) < 30000:
                         items = natsorted(items, key=lambda x: x.name)
                     else:
                         items.sort(key=lambda x: x.name)
+
                     widget.addTopLevelItems(items)
+                    self.update_selected_filter_channels()
 
                 else:
                     iterator = QtWidgets.QTreeWidgetItemIterator(widget)
                     while item := iterator.value():
                         if item.entry in result:
                             item.setCheckState(0, QtCore.Qt.CheckState.Checked)
-                        else:
-                            item.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
 
                         iterator += 1
         except:
@@ -1069,8 +1072,6 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
         source_files = [Path(self.files_list.item(row).text()) for row in range(count)]
         if not count:
             self.filter_tree.clear()
-            return
-        elif self.filter_tree.topLevelItemCount():
             return
         else:
             uuid = os.urandom(6).hex()
@@ -1098,8 +1099,7 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
 
                         iterator += 1
                 else:
-                    while iterator.value():
-                        item = iterator.value()
+                    while item := iterator.value():
 
                         if item.checkState(0) == QtCore.Qt.CheckState.Checked:
                             signals.add(item.entry)
@@ -1315,7 +1315,7 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
             except ImportError:
                 MessageBox.critical(
                     self,
-                    "Export to HDF5 unavailale",
+                    "export_batch to HDF5 unavailale",
                     "h5py package not found; export to HDF5 is unavailable",
                 )
                 return
@@ -1327,7 +1327,7 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
                 except ImportError:
                     MessageBox.critical(
                         self,
-                        "Export to mat v7.3 unavailale",
+                        "export_batch to mat v7.3 unavailale",
                         "hdf5storage package not found; export to mat 7.3 is unavailable",
                     )
                     return
@@ -1337,7 +1337,7 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
                 except ImportError:
                     MessageBox.critical(
                         self,
-                        "Export to mat v4 and v5 unavailale",
+                        "export_batch to mat v4 and v5 unavailale",
                         "scipy package not found; export to mat is unavailable",
                     )
                     return
@@ -1348,7 +1348,7 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
             except ImportError:
                 MessageBox.critical(
                     self,
-                    "Export to parquet unavailale",
+                    "export_batch to parquet unavailale",
                     "fastparquet package not found; export to parquet is unavailable",
                 )
                 return
@@ -1610,9 +1610,9 @@ class BatchWidget(Ui_batch_widget, QtWidgets.QWidget):
                 icon = QtGui.QIcon()
                 icon.addPixmap(QtGui.QPixmap(":/export.png"), QtGui.QIcon.Mode.Normal, QtGui.QIcon.State.Off)
                 progress.signals.setWindowIcon.emit(icon)
-                progress.signals.setWindowTitle.emit(f"Export measurement {mdf_index+1} of {count}")
+                progress.signals.setWindowTitle.emit(f"export_batch measurement {mdf_index+1} of {count}")
                 progress.signals.setLabelText.emit(
-                    f"Exporting measurement {mdf_index+1} of {count} to {output_format} (be patient this might take a while)\n{source_file}"
+                    f"export_batching measurement {mdf_index+1} of {count} to {output_format} (be patient this might take a while)\n{source_file}"
                 )
 
                 delimiter = self.delimiter.text() or ","
@@ -1846,8 +1846,7 @@ MultiRasterSeparator;&
             iterator = QtWidgets.QTreeWidgetItemIterator(self.filter_tree)
 
             if self.filter_view.currentText() == "Internal file structure":
-                while iterator.value():
-                    item = iterator.value()
+                while item := iterator.value():
                     if item.parent() is None:
                         iterator += 1
                         continue
@@ -1860,9 +1859,9 @@ MultiRasterSeparator;&
                         item.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
 
                     iterator += 1
+
             elif self.filter_view.currentText() == "Natural sort":
-                while iterator.value():
-                    item = iterator.value()
+                while item := iterator.value():
 
                     channel_name = item.text(0)
                     if channel_name in channels:
@@ -1904,3 +1903,147 @@ MultiRasterSeparator;&
                 else:
                     items.sort(key=lambda x: x.name)
                 self.filter_tree.addTopLevelItems(items)
+
+    def connect_export_updates(self):
+        self.output_format.currentTextChanged.connect(self.store_export_setttings)
+
+        self.mdf_version.currentTextChanged.connect(self.store_export_setttings)
+        self.mdf_compression.currentTextChanged.connect(self.store_export_setttings)
+        self.mdf_split.stateChanged.connect(self.store_export_setttings)
+        self.mdf_split_size.valueChanged.connect(self.store_export_setttings)
+
+        self.single_time_base.stateChanged.connect(self.store_export_setttings)
+        self.time_from_zero.stateChanged.connect(self.store_export_setttings)
+        self.time_as_date.stateChanged.connect(self.store_export_setttings)
+        self.raw.stateChanged.connect(self.store_export_setttings)
+        self.use_display_names.stateChanged.connect(self.store_export_setttings)
+        self.reduce_memory_usage.stateChanged.connect(self.store_export_setttings)
+        self.export_compression.currentTextChanged.connect(self.store_export_setttings)
+        self.empty_channels.currentTextChanged.connect(self.store_export_setttings)
+
+        self.single_time_base_csv.stateChanged.connect(self.store_export_setttings)
+        self.time_from_zero_csv.stateChanged.connect(self.store_export_setttings)
+        self.time_as_date_csv.stateChanged.connect(self.store_export_setttings)
+        self.raw_csv.stateChanged.connect(self.store_export_setttings)
+        self.add_units.stateChanged.connect(self.store_export_setttings)
+        self.doublequote.stateChanged.connect(self.store_export_setttings)
+        self.use_display_names_csv.stateChanged.connect(self.store_export_setttings)
+        self.empty_channels_csv.currentTextChanged.connect(self.store_export_setttings)
+        self.delimiter.editingFinished.connect(self.store_export_setttings)
+        self.escapechar.editingFinished.connect(self.store_export_setttings)
+        self.lineterminator.editingFinished.connect(self.store_export_setttings)
+        self.quotechar.editingFinished.connect(self.store_export_setttings)
+        self.quoting.currentTextChanged.connect(self.store_export_setttings)
+
+        self.single_time_base_mat.stateChanged.connect(self.store_export_setttings)
+        self.time_from_zero_mat.stateChanged.connect(self.store_export_setttings)
+        self.time_as_date_mat.stateChanged.connect(self.store_export_setttings)
+        self.raw_mat.stateChanged.connect(self.store_export_setttings)
+        self.use_display_names_mat.stateChanged.connect(self.store_export_setttings)
+        self.reduce_memory_usage_mat.stateChanged.connect(self.store_export_setttings)
+        self.empty_channels_mat.currentTextChanged.connect(self.store_export_setttings)
+        self.export_compression_mat.currentTextChanged.connect(self.store_export_setttings)
+        self.mat_format.currentTextChanged.connect(self.store_export_setttings)
+        self.oned_as.currentTextChanged.connect(self.store_export_setttings)
+
+    def restore_export_setttings(self):
+        self.output_format.setCurrentText(self._settings.value("export_batch", "MDF"))
+
+        self.mdf_version.setCurrentText(self._settings.setValue("export_batch/MDF/version", "4.10"))
+        self.mdf_compression.setCurrentText(self._settings.value("export_batch/MDF/compression", "transposed deflate"))
+        self.mdf_split.setChecked(self._settings.value("export_batch/MDF/split_data_blocks", True, type=bool))
+        self.mdf_split_size.setValue(self._settings.value("export_batch/MDF/split_size", 4, type=int))
+
+        self.single_time_base.setChecked(self._settings.value("export_batch/HDF5/single_time_base", False, type=bool))
+        self.time_from_zero.setChecked(self._settings.value("export_batch/HDF5/time_from_zero", False, type=bool))
+        self.time_as_date.setChecked(self._settings.value("export_batch/HDF5/time_as_date", False, type=bool))
+        self.raw.setChecked(self._settings.value("export_batch/HDF5/raw", False, type=bool))
+        self.use_display_names.setChecked(self._settings.value("export_batch/HDF5/use_display_names", False, type=bool))
+        self.reduce_memory_usage.setChecked(
+            self._settings.value("export_batch/HDF5/reduce_memory_usage", False, type=bool)
+        )
+        self.export_compression.setCurrentText(self._settings.value("export_batch/HDF5/export_compression", "gzip"))
+        self.empty_channels.setCurrentText(self._settings.value("export_batch/HDF5/empty_channels", "skip"))
+
+        self.single_time_base_csv.setChecked(
+            self._settings.value("export_batch/CSV/single_time_base_csv", False, type=bool)
+        )
+        self.time_from_zero_csv.setChecked(
+            self._settings.value("export_batch/CSV/time_from_zero_csv", False, type=bool)
+        )
+        self.time_as_date_csv.setChecked(self._settings.value("export_batch/CSV/time_as_date_csv", False, type=bool))
+        self.raw_csv.setChecked(self._settings.value("export_batch/CSV/raw_csv", False, type=bool))
+        self.add_units.setChecked(self._settings.value("export_batch/CSV/add_units", False, type=bool))
+        self.doublequote.setChecked(self._settings.value("export_batch/CSV/doublequote", False, type=bool))
+        self.use_display_names_csv.setChecked(
+            self._settings.value("export_batch/CSV/use_display_names_csv", False, type=bool)
+        )
+        self.empty_channels_csv.setCurrentText(self._settings.value("export_batch/CSV/empty_channels_csv", "skip"))
+        self.delimiter.setText(self._settings.value("export_batch/CSV/delimiter", ","))
+        self.escapechar.setText(self._settings.value("export_batch/CSV/escapechar", ""))
+        self.lineterminator.setText(self._settings.value("export_batch/CSV/lineterminator", r"\r\n"))
+        self.quotechar.setText(self._settings.value("export_batch/CSV/quotechar", '"'))
+        self.quoting.setCurrentText(self._settings.value("export_batch/CSV/quoting", "MINIMAL"))
+
+        self.single_time_base_mat.setChecked(
+            self._settings.value("export_batch/MAT/single_time_base_mat", False, type=bool)
+        )
+        self.time_from_zero_mat.setChecked(
+            self._settings.value("export_batch/MAT/time_from_zero_mat", False, type=bool)
+        )
+        self.time_as_date_mat.setChecked(self._settings.value("export_batch/MAT/time_as_date_mat", False, type=bool))
+        self.raw_mat.setChecked(self._settings.value("export_batch/MAT/raw_mat", False, type=bool))
+        self.use_display_names_mat.setChecked(
+            self._settings.value("export_batch/MAT/use_display_names_mat", False, type=bool)
+        )
+        self.reduce_memory_usage_mat.setChecked(
+            self._settings.value("export_batch/MAT/reduce_memory_usage_mat", False, type=bool)
+        )
+        self.empty_channels_mat.setCurrentText(self._settings.value("export_batch/MAT/empty_channels_mat", "skip"))
+        self.export_compression_mat.setCurrentText(
+            self._settings.value("export_batch/MAT/export_compression_mat", "enabled")
+        )
+        self.mat_format.setCurrentText(self._settings.value("export_batch/MAT/mat_format", "4"))
+        self.oned_as.setCurrentText(self._settings.value("export_batch/MAT/oned_as", "row"))
+
+    def store_export_setttings(self, *args):
+        self._settings.setValue("export_batch", self.output_format.currentText())
+
+        self._settings.setValue("export_batch/MDF/version", self.mdf_version.currentText())
+        self._settings.setValue("export_batch/MDF/compression", self.mdf_compression.currentText())
+        self._settings.setValue("export_batch/MDF/split_data_blocks", self.mdf_split.isChecked())
+        self._settings.setValue("export_batch/MDF/split_size", self.mdf_split_size.value())
+
+        self._settings.setValue("export_batch/HDF5/single_time_base", self.single_time_base.isChecked())
+        self._settings.setValue("export_batch/HDF5/time_from_zero", self.time_from_zero.isChecked())
+        self._settings.setValue("export_batch/HDF5/time_as_date", self.time_as_date.isChecked())
+        self._settings.setValue("export_batch/HDF5/raw", self.raw.isChecked())
+        self._settings.setValue("export_batch/HDF5/use_display_names", self.use_display_names.isChecked())
+        self._settings.setValue("export_batch/HDF5/reduce_memory_usage", self.reduce_memory_usage.isChecked())
+        self._settings.setValue("export_batch/HDF5/export_compression", self.export_compression.currentText())
+        self._settings.setValue("export_batch/HDF5/empty_channels", self.empty_channels.currentText())
+
+        self._settings.setValue("export_batch/CSV/single_time_base_csv", self.single_time_base_csv.isChecked())
+        self._settings.setValue("export_batch/CSV/time_from_zero_csv", self.time_from_zero_csv.isChecked())
+        self._settings.setValue("export_batch/CSV/time_as_date_csv", self.time_as_date_csv.isChecked())
+        self._settings.setValue("export_batch/CSV/raw_csv", self.raw_csv.isChecked())
+        self._settings.setValue("export_batch/CSV/add_units", self.add_units.isChecked())
+        self._settings.setValue("export_batch/CSV/doublequote", self.doublequote.isChecked())
+        self._settings.setValue("export_batch/CSV/use_display_names_csv", self.use_display_names_csv.isChecked())
+        self._settings.setValue("export_batch/CSV/empty_channels_csv", self.empty_channels_csv.currentText())
+        self._settings.setValue("export_batch/CSV/delimiter", self.delimiter.text())
+        self._settings.setValue("export_batch/CSV/escapechar", self.escapechar.text())
+        self._settings.setValue("export_batch/CSV/lineterminator", self.lineterminator.text())
+        self._settings.setValue("export_batch/CSV/quotechar", self.quotechar.text())
+        self._settings.setValue("export_batch/CSV/quoting", self.quoting.currentText())
+
+        self._settings.setValue("export_batch/MAT/single_time_base_mat", self.single_time_base_mat.isChecked())
+        self._settings.setValue("export_batch/MAT/time_from_zero_mat", self.time_from_zero_mat.isChecked())
+        self._settings.setValue("export_batch/MAT/time_as_date_mat", self.time_as_date_mat.isChecked())
+        self._settings.setValue("export_batch/MAT/raw_mat", self.raw_mat.isChecked())
+        self._settings.setValue("export_batch/MAT/use_display_names_mat", self.use_display_names_mat.isChecked())
+        self._settings.setValue("export_batch/MAT/reduce_memory_usage_mat", self.reduce_memory_usage_mat.isChecked())
+        self._settings.setValue("export_batch/MAT/empty_channels_mat", self.empty_channels_mat.currentText())
+        self._settings.setValue("export_batch/MAT/export_compression_mat", self.export_compression_mat.currentText())
+        self._settings.setValue("export_batch/MAT/mat_format", self.mat_format.currentText())
+        self._settings.setValue("export_batch/MAT/oned_as", self.oned_as.currentText())
